@@ -1,3 +1,9 @@
+/*
+Part of SQUID transcriptomic structural variation detector
+(c) 2017 by  Cong Ma, Mingfu Shao, Carl Kingsford, and Carnegie Mellon University.
+See LICENSE for licensing.
+*/
+
 #include "SegmentGraph.h"
 
 void ReverseComplement(string::iterator itbegin, string::iterator itend){
@@ -21,7 +27,7 @@ pair<int,int> ExtremeValue(vector<int>::iterator itbegin, vector<int>::iterator 
 	return x;
 };
 
-void CountTop(vector< pair<int,int> >& x){
+void CountTop(Edge_t e, vector< pair<int,int> >& x){
 	sort(x.begin(), x.end(), [](pair<int,int> a, pair<int,int> b){if(a.first!=b.first) return a.first<b.first; else return a.second<b.second;});
 	vector< pair<int,int> > y=x;
 	vector< pair<int,int> >::iterator ituniq=unique(y.begin(), y.end(), [](pair<int,int> a, pair<int,int> b){return a.first==b.first && a.second==b.second;});
@@ -48,6 +54,30 @@ void CountTop(vector< pair<int,int> >& x){
 			break;
 		*it=0;
 	}
+	if(x.size()==0){
+		int maxBP1=0, maxBP2=0;
+		int minBP1=std::numeric_limits<int>::max(), minBP2=std::numeric_limits<int>::max();
+		for(vector< pair<int,int> >::iterator it=y.begin(); it!=y.end(); it++){
+			if(it->first<minBP1)
+				minBP1=it->first;
+			if(it->first>maxBP1)
+				maxBP1=it->first;
+			if(it->second<minBP2)
+				minBP2=it->second;
+			if(it->second>maxBP2)
+				maxBP2=it->second;
+		}
+		pair<int,int> tmp;
+		if(e.Head1)
+			tmp.first=minBP1;
+		else
+			tmp.first=maxBP1;
+		if(e.Head2)
+			tmp.second=minBP2;
+		else
+			tmp.second=maxBP2;
+		x.push_back(tmp);
+	}
 };
 
 SegmentGraph_t::SegmentGraph_t(const vector<int>& RefLength, SBamrecord_t& Chimrecord, string bamfile){
@@ -56,11 +86,17 @@ SegmentGraph_t::SegmentGraph_t(const vector<int>& RefLength, SBamrecord_t& Chimr
 	else
 		BuildNode_BWA(RefLength, bamfile);
 	BuildEdges(Chimrecord, bamfile);
+	// TmpWriteBEDPE("tmpedges2_before_filterbyweight.txt", *this, RefName);
 	FilterbyWeight();
-	FilterbyInterleaving();
-	FilterEdges();
+	// TmpWriteBEDPE("tmpedges2_before_filterbyinterleave.txt", *this, RefName);
+	vector<bool> KeepEdge;
+	FilterbyInterleaving(KeepEdge);
+	// TmpWriteBEDPE("tmpedges2_before_filteredges.txt", *this, RefName);
+	FilterEdges(KeepEdge);
+	// TmpWriteBEDPE("tmpedges2_before_compressnode.txt", *this, RefName);
 	CompressNode();
 	FurtherCompressNode();
+	// TmpWriteBEDPE("tmpedges2_before_almostdone.txt", *this, RefName);
 	ConnectedComponent();
 	MultiplyDisEdges();
 	cout<<vNodes.size()<<'\t'<<vEdges.size()<<endl;
@@ -255,14 +291,14 @@ void SegmentGraph_t::BuildNode_STAR(const vector<int>& RefLength, SBamrecord_t& 
 			else
 				lastreadrec=tmpreadrec;
 
-			if(record.IsFirstMate()){
+			if(record.IsFirstMate() && readrec.FirstRead.size()!=0){
 				vector<SingleBamRec_t>::iterator it=readrec.FirstRead.begin();
 				ReadsMain.push_back(make_pair(it->RefID, make_pair(it->RefPos, it->MatchRef)));
 				it++;
 				for(; it!=readrec.FirstRead.end(); it++)
 					ReadsOther.push_back(make_pair(it->RefID, make_pair(it->RefPos, it->MatchRef)));
 			}
-			else{
+			else if(readrec.SecondMate.size()!=0){
 				vector<SingleBamRec_t>::iterator it=readrec.SecondMate.begin();
 				ReadsMain.push_back(make_pair(it->RefID, make_pair(it->RefPos, it->MatchRef)));
 				it++;
@@ -570,7 +606,7 @@ void SegmentGraph_t::BuildNode_STAR(const vector<int>& RefLength, SBamrecord_t& 
 				recordconcordant=true;
 			else if(record.IsMapped() && record.IsMateMapped() && record.MateRefID!=-1 && !record.IsReverseStrand() && record.IsMateReverseStrand() && record.RefID==record.MateRefID && record.MatePosition>=record.Position && record.MatePosition-record.Position<=750000 && record.IsProperPair())
 				recordconcordant=true;
-			if(recordconcordant){
+			if(recordconcordant && (int)readrec.FirstRead.size()+(int)readrec.SecondMate.size()>0){
 				if(otherChr==record.RefID && record.IsFirstMate())
 					otherrightmost=(otherrightmost>readrec.FirstRead.front().RefPos+readrec.FirstRead.front().MatchRef) ? otherrightmost:(readrec.FirstRead.front().RefPos+readrec.FirstRead.front().MatchRef);
 				else if(otherChr==record.RefID && record.IsSecondMate())
@@ -790,6 +826,8 @@ void SegmentGraph_t::BuildNode_BWA(const vector<int>& RefLength, string bamfile)
 			if((DiscordantCluster.size()!=offsetDiscordantCluster && record.RefID!=DiscordantCluster[offsetDiscordantCluster].RefID) || (ConcordantCluster.size()!=offsetConcordantCluster && record.RefID!=ConcordantCluster[offsetConcordantCluster].RefID) || (PartialAlignCluster.size()!=offsetPartialAlignCluster && record.RefID!=PartialAlignCluster[offsetPartialAlignCluster].RefID))
 				otherrightmost=0;
 			ReadRec_t readrec(record);
+			if(readrec.FirstRead.size()==0 && readrec.SecondMate.size()==0)
+				continue;
 			for(vector<SingleBamRec_t>::iterator it=readrec.FirstRead.begin(); it!=readrec.FirstRead.end(); it++)
 				Reads.push_back(make_pair(it->RefID, make_pair(it->RefPos, it->MatchRef)));
 			for(vector<SingleBamRec_t>::iterator it=readrec.SecondMate.begin(); it!=readrec.SecondMate.end(); it++)
@@ -1420,7 +1458,7 @@ void SegmentGraph_t::RawEdgesChim(SBamrecord_t& Chimrecord){
 					assert(tmp.Ind1>=0 && tmp.Ind1<(int)vNodes.size() && tmp.Ind2>=0 && tmp.Ind2<(int)vNodes.size());
 					if(!IsDiscordant(tmp))
 						vEdges.push_back(tmp);
-					else{
+					else if(it->IsPairDiscordant(false)){
 						int breakpoint1=(it->FirstRead.back().IsReverse)?(it->FirstRead.back().RefPos):(it->FirstRead.back().RefPos+it->FirstRead.back().MatchRef);
 						int breakpoint2=(it->SecondMate.back().IsReverse)?(it->SecondMate.back().RefPos):(it->SecondMate.back().RefPos+it->SecondMate.back().MatchRef);
 						if(it->FirstRead.back()>it->SecondMate.back()){
@@ -1443,19 +1481,22 @@ void SegmentGraph_t::RawEdgesChim(SBamrecord_t& Chimrecord){
 	for(map<Edge_t, vector< pair<int,int> > >::iterator it=PairBreakpoints.begin(); it!=PairBreakpoints.end(); it++){
 		sort(it->second.begin(), it->second.end(), [](pair<int,int> a, pair<int,int> b){if(a.first!=b.first) return a.first<b.first; else return a.second<b.second;});
 		vector< pair<int,int> > tmpBreakpoints;
+		// count group weight of each discordant edge and add to vector
 		for(vector< pair<int,int> >::iterator itbp=it->second.begin(); itbp!=it->second.end(); itbp++){
 			int groupcount=-1;
-			for(vector< pair<int,int> >::iterator itbp2=itbp; itbp2!=(it->second.begin()-1); itbp2--)
+			for(vector< pair<int,int> >::iterator itbp2=itbp; itbp2!=(it->second.begin()-1); itbp2--){
 				if(abs(itbp->first-itbp2->first)+abs(itbp->second-itbp2->second)<FragSize)
 					groupcount++;
 				else if(itbp2->first<itbp->first-FragSize)
 					break;
-			for(vector< pair<int,int> >::iterator itbp2=itbp; itbp2!=(it->second.end()); itbp2++)
+			}
+			for(vector< pair<int,int> >::iterator itbp2=itbp; itbp2!=(it->second.end()); itbp2++){
 				if(abs(itbp->first-itbp2->first)+abs(itbp->second-itbp2->second)<FragSize)
 					groupcount++;
 				else if(itbp2->first>itbp->first+FragSize)
 					break;
-			if(groupcount>Min_Edge_Weight-4)
+			}
+			// if(groupcount>Min_Edge_Weight-4)
 				tmpBreakpoints.push_back(*itbp);
 		}
 		Edge_t tmp=it->first;
@@ -1516,7 +1557,7 @@ void SegmentGraph_t::RawEdgesOther(SBamrecord_t& Chimrecord, string bamfile){
 				whetherbuildedge=true;
 			if(whetherbuildedge){ // only consider first mate record, to avoid doubling edge weight.
 				vector<int> tmpRead_Node=LocateRead(firstfrontindex, readrec);
-				if(tmpRead_Node[0]!=-1)
+				if(tmpRead_Node.size()!=0 && tmpRead_Node[0]!=-1)
 					firstfrontindex=tmpRead_Node[0];
 				for(int k=0; k<tmpRead_Node.size(); k++)
 					if(tmpRead_Node[k]==-1){
@@ -1589,7 +1630,8 @@ void SegmentGraph_t::RawEdgesOther(SBamrecord_t& Chimrecord, string bamfile){
 							bool tmpHead1=(readrec.FirstRead.back().IsReverse)?true:false, tmpHead2=(readrec.SecondMate.back().IsReverse)?true:false;
 							Edge_t tmp(i, tmpHead1, j, tmpHead2, 1);
 							assert(tmp.Ind1>=0 && tmp.Ind1<(int)vNodes.size() && tmp.Ind2>=0 && tmp.Ind2<(int)vNodes.size());
-							vEdges.push_back(tmp);
+							if(readrec.IsPairDiscordant(false)==IsDiscordant(tmp))
+								vEdges.push_back(tmp);
 						}
 					}
 				}
@@ -1628,9 +1670,9 @@ void SegmentGraph_t::RawEdges(SBamrecord_t& Chimrecord, string bamfile){
 			int IHtagvalue=0;
 			if(IHtag)
 				record.GetTag("IH", IHtagvalue);
-			if(record.IsDuplicate() || record.MapQuality==0 || !record.IsMapped())
+			if(record.IsDuplicate() || !record.IsMapped())
 				continue;
-			else if((XAtag || IHtagvalue>1) && record.IsFirstMate())
+			else if((XAtag || IHtagvalue>1 || record.MapQuality==0) && record.IsFirstMate())
 				continue;
 			else if(!(XAtag || IHtagvalue>1) && !record.IsFirstMate())
 				continue;
@@ -1656,7 +1698,7 @@ void SegmentGraph_t::RawEdges(SBamrecord_t& Chimrecord, string bamfile){
 				readrec.FirstRead.push_back(tmp);
 			}
 
-			if(record.IsFirstMate() && (readrec.FirstRead.front().ReadPos <= 15 || readrec.FirstLowPhred)){ // only consider first mate record, to avoid doubling edge weight.
+			if(record.IsFirstMate() && readrec.FirstRead.size()>0 && (readrec.FirstRead.front().ReadPos <= 15 || readrec.FirstLowPhred)){ // only consider first mate record, to avoid doubling edge weight.
 				vector<int> tmpRead_Node=LocateRead(firstfrontindex, readrec);
 				if(tmpRead_Node[0]!=-1)
 					firstfrontindex=tmpRead_Node[0];
@@ -1738,7 +1780,11 @@ void SegmentGraph_t::RawEdges(SBamrecord_t& Chimrecord, string bamfile){
 					}
 				}
 			}
-			else if(!record.IsFirstMate() && (readrec.SecondMate.front().ReadPos <= 15 || readrec.SecondLowPhred)){
+			else if(!record.IsFirstMate() && readrec.SecondMate.size()>0){
+			// else if(!record.IsFirstMate() && readrec.SecondMate.size()>0 && (readrec.SecondMate.front().ReadPos <= 15 || readrec.SecondLowPhred)){
+				readrec.SecondMate.resize(1);
+				readrec.SecondMate[0].MatchRef=15;
+				readrec.SecondMate[0].MatchRead=15;
 				vector<int> tmpRead_Node=LocateRead(firstfrontindex, readrec);
 				if(tmpRead_Node[0]!=-1)
 					firstfrontindex=tmpRead_Node[0];
@@ -1872,6 +1918,163 @@ void SegmentGraph_t::BuildEdges(SBamrecord_t& Chimrecord, string bamfile){
 };
 
 void SegmentGraph_t::FilterbyWeight(){
+	int relaxedweight=Min_Edge_Weight-2;
+	vector<bool> HasInspected(vEdges.size(), false);
+	for(int i=0; i<vEdges.size(); i++){
+		if(HasInspected[i])
+			continue;
+		int chr1=vNodes[vEdges[i].Ind1].Chr;
+		int chr2=vNodes[vEdges[i].Ind2].Chr;
+		vector<int> NearbyIdx;
+		NearbyIdx.push_back(i);
+		HasInspected[i]=true;
+		if(vEdges[i].Head1 || !vEdges[i].Head2 || vNodes[vEdges[i].Ind1].Chr!=vNodes[vEdges[i].Ind2].Chr){
+			// if the edge is discordant, find nearby edges the same way as FilterbyInterleaving
+			// we don't use this method for long-lasting spurious edges may extending forever.
+			// Now we are considering both pair of junctions in an TSV, each pair need separate range of indexes and positions to detect long-lasting spurious edge.
+			pair<int,int> RangeIdx1_SameOri=make_pair(vEdges[i].Ind1, vEdges[i].Ind1);
+			pair<int,int> RangePos1_SameOri;
+			RangePos1_SameOri.first=(vEdges[i].Head1)?vNodes[vEdges[i].Ind1].Position:(vNodes[vEdges[i].Ind1].Position+vNodes[vEdges[i].Ind1].Length);
+			RangePos1_SameOri.second=RangePos1_SameOri.first;
+			pair<int,int> RangeIdx2_SameOri=make_pair(vEdges[i].Ind2, vEdges[i].Ind2);
+			pair<int,int> RangePos2_SameOri;
+			RangePos2_SameOri.first=(vEdges[i].Head2)?vNodes[vEdges[i].Ind2].Position:(vNodes[vEdges[i].Ind2].Position+vNodes[vEdges[i].Ind2].Length);
+			RangePos2_SameOri.second=RangePos2_SameOri.first;
+
+			pair<int,int> RangeIdx1_OppoOri=make_pair(RangeIdx1_SameOri.first, RangeIdx1_SameOri.second);
+			pair<int,int> RangePos1_OppoOri=make_pair(RangePos1_SameOri.first, RangePos1_SameOri.second);
+			pair<int,int> RangeIdx2_OppoOri=make_pair(RangeIdx2_SameOri.first, RangeIdx2_SameOri.second);
+			pair<int,int> RangePos2_OppoOri=make_pair(RangePos2_SameOri.first, RangePos2_SameOri.second);
+			bool longconnectiongroup=false;
+			// now beginning the finding procedure
+			// for a TSV, there are two pairs of connections. consider both pair of connections in the same group to sum up groupweight.
+			// for example, an inversion A -- (-B) -- C, both A_t -- B_t and B_h -- C_h are summed in the groupweight
+			for(int j=i-1; j>-1 && vNodes[vEdges[j].Ind1].Chr==chr1; j--){
+				int newpos1=(vEdges[j].Head1)? vNodes[vEdges[j].Ind1].Position:(vNodes[vEdges[j].Ind1].Position+vNodes[vEdges[j].Ind1].Length);
+				int newpos2=(vEdges[j].Head2)? vNodes[vEdges[j].Ind2].Position:(vNodes[vEdges[j].Ind2].Position+vNodes[vEdges[j].Ind2].Length);
+				if((vEdges[i].Ind1 < min(RangeIdx1_SameOri.first, RangeIdx1_OppoOri.first)-Concord_Dist_Idx) || (newpos1 < min(RangePos1_SameOri.first, RangePos1_OppoOri.first)-Concord_Dist_Pos))
+					break;
+				if(vEdges[j].Head1==vEdges[i].Head1 && vEdges[j].Head2==vEdges[i].Head2){
+					if(IsDiscordant(j) && vEdges[j].Ind2>=RangeIdx2_SameOri.first-Concord_Dist_Idx && vEdges[i].Ind2<=RangeIdx2_SameOri.second+Concord_Dist_Idx 
+						&& newpos2>=RangePos2_SameOri.first-Concord_Dist_Pos && newpos2<=RangePos2_SameOri.second+Concord_Dist_Pos){
+						NearbyIdx.push_back(j);
+						// update range info
+						RangeIdx1_SameOri.first=(vEdges[j].Ind1<RangeIdx1_SameOri.first)?(vEdges[j].Ind1):(RangeIdx1_SameOri.first);
+						RangePos1_SameOri.first=(newpos1<RangePos1_SameOri.first)?(newpos1):(RangePos1_SameOri.first);
+						RangeIdx2_SameOri.first=(vEdges[j].Ind2<RangeIdx2_SameOri.first)?(vEdges[j].Ind2):(RangeIdx2_SameOri.first);
+						RangeIdx2_SameOri.second=(vEdges[j].Ind2>RangeIdx2_SameOri.second)?(vEdges[j].Ind2):(RangeIdx2_SameOri.second);
+						RangePos2_SameOri.first=(newpos2<RangePos2_SameOri.first)?(newpos2):(RangePos2_SameOri.first);
+						RangePos2_SameOri.second=(newpos2>RangePos2_SameOri.second)?(newpos2):(RangePos2_SameOri.second);
+						if(RangeIdx1_SameOri.second>=RangeIdx2_SameOri.first)
+							longconnectiongroup=true;
+					}
+				}
+				else if(vEdges[j].Head1!=vEdges[i].Head1 && vEdges[j].Head2!=vEdges[i].Head2){
+					if(IsDiscordant(j) && vEdges[j].Ind2>=RangeIdx2_OppoOri.first-Concord_Dist_Idx && vEdges[i].Ind2<=RangeIdx2_OppoOri.second+Concord_Dist_Idx 
+						&& newpos2>=RangePos2_OppoOri.first-Concord_Dist_Pos && newpos2<=RangePos2_OppoOri.second+Concord_Dist_Pos){
+						NearbyIdx.push_back(j);
+						// update range info
+						RangeIdx1_OppoOri.first=(vEdges[j].Ind1<RangeIdx1_OppoOri.first)?(vEdges[j].Ind1):(RangeIdx1_OppoOri.first);
+						RangePos1_OppoOri.first=(newpos1<RangePos1_OppoOri.first)?(newpos1):(RangePos1_OppoOri.first);
+						RangeIdx2_OppoOri.first=(vEdges[j].Ind2<RangeIdx2_OppoOri.first)?(vEdges[j].Ind2):(RangeIdx2_OppoOri.first);
+						RangeIdx2_OppoOri.second=(vEdges[j].Ind2>RangeIdx2_OppoOri.second)?(vEdges[j].Ind2):(RangeIdx2_OppoOri.second);
+						RangePos2_OppoOri.first=(newpos2<RangePos2_OppoOri.first)?(newpos2):(RangePos2_OppoOri.first);
+						RangePos2_OppoOri.second=(newpos2>RangePos2_OppoOri.second)?(newpos2):(RangePos2_OppoOri.second);
+						if(RangeIdx1_OppoOri.second>=RangeIdx2_OppoOri.first)
+							longconnectiongroup=true;
+					}
+				}
+			}
+			for(int j=i+1; j<vEdges.size() && vNodes[vEdges[j].Ind1].Chr==chr1; j++){
+				int newpos1=(vEdges[j].Head1)? vNodes[vEdges[j].Ind1].Position:(vNodes[vEdges[j].Ind1].Position+vNodes[vEdges[j].Ind1].Length);
+				int newpos2=(vEdges[j].Head2)? vNodes[vEdges[j].Ind2].Position:(vNodes[vEdges[j].Ind2].Position+vNodes[vEdges[j].Ind2].Length);
+				if((vEdges[j].Ind1 > max(RangeIdx1_SameOri.second, RangeIdx1_OppoOri.second)+Concord_Dist_Idx) || (newpos1 > max(RangePos1_SameOri.second, RangePos1_OppoOri.second)+Concord_Dist_Pos))
+					break;
+				if(vEdges[j].Head1==vEdges[i].Head1 && vEdges[j].Head2==vEdges[i].Head2){
+					if(IsDiscordant(j) && vEdges[j].Ind2>=RangeIdx2_SameOri.first-Concord_Dist_Idx && vEdges[j].Ind2<=RangeIdx2_SameOri.second+Concord_Dist_Idx 
+						&& newpos2>=RangePos2_SameOri.first-Concord_Dist_Pos && newpos2<=RangePos2_SameOri.second+Concord_Dist_Pos){
+						NearbyIdx.push_back(j);
+						RangeIdx1_SameOri.second=(vEdges[j].Ind1>RangeIdx1_SameOri.second)?(vEdges[j].Ind1):(RangeIdx1_SameOri.second);
+						RangePos1_SameOri.second=(newpos1>RangePos1_SameOri.second)?(newpos1):(RangePos1_SameOri.second);
+						RangeIdx2_SameOri.first=(vEdges[j].Ind2<RangeIdx2_SameOri.first)?(vEdges[j].Ind2):(RangeIdx2_SameOri.first);
+						RangeIdx2_SameOri.second=(vEdges[j].Ind2>RangeIdx2_SameOri.second)?(vEdges[j].Ind2):(RangeIdx2_SameOri.second);
+						RangePos2_SameOri.first=(newpos2<RangePos2_SameOri.first)?(newpos2):(RangePos2_SameOri.first);
+						RangePos2_SameOri.second=(newpos2>RangePos2_SameOri.second)?(newpos2):(RangePos2_SameOri.second);
+						if(RangeIdx1_SameOri.second>=RangeIdx2_SameOri.first)
+							longconnectiongroup=true;
+					}
+				}
+				else if(vEdges[j].Head1!=vEdges[i].Head1 && vEdges[j].Head2!=vEdges[i].Head2){
+					if(IsDiscordant(j) && vEdges[j].Ind2>=RangeIdx2_OppoOri.first-Concord_Dist_Idx && vEdges[i].Ind2<=RangeIdx2_OppoOri.second+Concord_Dist_Idx 
+						&& newpos2>=RangePos2_OppoOri.first-Concord_Dist_Pos && newpos2<=RangePos2_OppoOri.second+Concord_Dist_Pos){
+						NearbyIdx.push_back(j);
+						// update range info
+						RangeIdx1_OppoOri.first=(vEdges[j].Ind1<RangeIdx1_OppoOri.first)?(vEdges[j].Ind1):(RangeIdx1_OppoOri.first);
+						RangePos1_OppoOri.first=(newpos1<RangePos1_OppoOri.first)?(newpos1):(RangePos1_OppoOri.first);
+						RangeIdx2_OppoOri.first=(vEdges[j].Ind2<RangeIdx2_OppoOri.first)?(vEdges[j].Ind2):(RangeIdx2_OppoOri.first);
+						RangeIdx2_OppoOri.second=(vEdges[j].Ind2>RangeIdx2_OppoOri.second)?(vEdges[j].Ind2):(RangeIdx2_OppoOri.second);
+						RangePos2_OppoOri.first=(newpos2<RangePos2_OppoOri.first)?(newpos2):(RangePos2_OppoOri.first);
+						RangePos2_OppoOri.second=(newpos2>RangePos2_OppoOri.second)?(newpos2):(RangePos2_OppoOri.second);
+						if(RangeIdx1_OppoOri.second>=RangeIdx2_OppoOri.first)
+							longconnectiongroup=true;
+					}
+				}
+			}
+			sort(NearbyIdx.begin(), NearbyIdx.end());
+			NearbyIdx.resize(distance(NearbyIdx.begin(), unique(NearbyIdx.begin(), NearbyIdx.end())));
+			if(!longconnectiongroup){
+				int sumweight=0;
+				for(int j=0; j<NearbyIdx.size(); j++)
+					sumweight+=vEdges[NearbyIdx[j]].Weight;
+				for(int j=0; j<NearbyIdx.size(); j++){
+					vEdges[NearbyIdx[j]].GroupWeight=(vEdges[NearbyIdx[j]].GroupWeight<sumweight)?sumweight:vEdges[NearbyIdx[j]].GroupWeight;
+					HasInspected[NearbyIdx[j]]=true;
+				}
+			}
+			else{
+				// XXX not sure whether this is correction solution, if a discordant edge has neighbors extending noisily
+				for(int j=0; j<NearbyIdx.size(); j++){
+					vEdges[NearbyIdx[j]].GroupWeight=vEdges[NearbyIdx[j]].Weight;
+					HasInspected[NearbyIdx[j]]=true;
+				}
+			}
+		}
+		else{
+			int pos1=(vEdges[i].Head1)?vNodes[vEdges[i].Ind1].Position:(vNodes[vEdges[i].Ind1].Position+vNodes[vEdges[i].Ind1].Length);
+			int pos2=(vEdges[i].Head2)?vNodes[vEdges[i].Ind2].Position:(vNodes[vEdges[i].Ind2].Position+vNodes[vEdges[i].Ind2].Length);
+			for(int j=i-1; j>-1 && vEdges[j].Ind1>=vEdges[i].Ind1-Concord_Dist_Idx && vNodes[vEdges[j].Ind1].Chr==chr1 && vNodes[vEdges[j].Ind1].Position+vNodes[vEdges[j].Ind1].Length>=pos1-Concord_Dist_Pos; j--){
+				int newchr1=vNodes[vEdges[j].Ind1].Chr, newpos1=(vEdges[j].Head1)? vNodes[vEdges[j].Ind1].Position:(vNodes[vEdges[j].Ind1].Position+vNodes[vEdges[j].Ind1].Length);
+				int newchr2=vNodes[vEdges[j].Ind2].Chr, newpos2=(vEdges[j].Head2)? vNodes[vEdges[j].Ind2].Position:(vNodes[vEdges[j].Ind2].Position+vNodes[vEdges[j].Ind2].Length);
+				if(vEdges[j].Ind2>vEdges[i].Ind1 && vEdges[i].Head1==vEdges[j].Head1 && vEdges[i].Head2==vEdges[j].Head2 && newchr1==chr1 && newchr2==chr2 && abs(vEdges[j].Ind2-vEdges[i].Ind2)<=Concord_Dist_Idx && abs(newpos1-pos1)<=Concord_Dist_Pos && abs(newpos2-pos2)<=Concord_Dist_Pos)
+					NearbyIdx.push_back(j);
+			}
+			for(int j=i+1; j<vEdges.size() && vEdges[j].Ind1<=vEdges[i].Ind1+Concord_Dist_Idx && vNodes[vEdges[j].Ind1].Chr==chr1 && vNodes[vEdges[j].Ind1].Position<=pos1+Concord_Dist_Pos; j++){
+				int newchr1=vNodes[vEdges[j].Ind1].Chr, newpos1=(vEdges[j].Head1)? vNodes[vEdges[j].Ind1].Position:(vNodes[vEdges[j].Ind1].Position+vNodes[vEdges[j].Ind1].Length);
+				int newchr2=vNodes[vEdges[j].Ind2].Chr, newpos2=(vEdges[j].Head2)? vNodes[vEdges[j].Ind2].Position:(vNodes[vEdges[j].Ind2].Position+vNodes[vEdges[j].Ind2].Length);
+				if(vEdges[j].Ind1<vEdges[i].Ind2 && vEdges[i].Head1==vEdges[j].Head1 && vEdges[i].Head2==vEdges[j].Head2 && newchr1==chr1 && newchr2==chr2 && abs(vEdges[j].Ind2-vEdges[i].Ind2)<=Concord_Dist_Idx && abs(newpos1-pos1)<=Concord_Dist_Pos && abs(newpos2-pos2)<=Concord_Dist_Pos)
+					NearbyIdx.push_back(j);
+			}
+			sort(NearbyIdx.begin(), NearbyIdx.end());
+			NearbyIdx.resize(distance(NearbyIdx.begin(), unique(NearbyIdx.begin(), NearbyIdx.end())));
+			int sumweight=0;
+			for(int j=0; j<NearbyIdx.size(); j++)
+				sumweight+=vEdges[NearbyIdx[j]].Weight;
+			vEdges[i].GroupWeight=sumweight;
+		}
+	}
+
+	// filter groupweight by relaxesweight threshold
+	vector<Edge_t> tmpEdges;
+	tmpEdges.reserve(vEdges.size());
+	for(int i=0; i<vEdges.size(); i++)
+		if(vEdges[i].GroupWeight > relaxedweight)
+			tmpEdges.push_back(vEdges[i]);
+	tmpEdges.reserve(tmpEdges.size());
+	vEdges=tmpEdges;
+	UpdateNodeLink();
+};
+
+/*void SegmentGraph_t::FilterbyWeight(){
 	int relaxedweight=Min_Edge_Weight-2; // use relaxed weight first, to filter more multi-linked bad nodes
 	vector<Edge_t> tmpEdges; tmpEdges.reserve(vEdges.size());
 	for(int i=0; i<vEdges.size(); i++){
@@ -1905,9 +2108,127 @@ void SegmentGraph_t::FilterbyWeight(){
 	tmpEdges.resize(distance(tmpEdges.begin(), endit));
 	vEdges=tmpEdges;
 	UpdateNodeLink();
+};*/
+
+void SegmentGraph_t::FilterbyInterleaving(vector<bool>& KeepEdge){
+	vector<bool> HasInspected(vEdges.size(), false);
+	KeepEdge.clear();
+	KeepEdge.assign(vEdges.size(), true);
+	for(int i=0; i<vEdges.size(); i++){
+		if(HasInspected[i])
+			continue;
+		// keep concordant edges
+		if(vEdges[i].Ind2-vEdges[i].Ind1<=Concord_Dist_Idx ||  (vNodes[vEdges[i].Ind1].Chr==vNodes[vEdges[i].Ind2].Chr && abs(vNodes[vEdges[i].Ind1].Position-vNodes[vEdges[i].Ind2].Position)<=Concord_Dist_Pos)){
+			HasInspected[i]=true;
+			KeepEdge[i]=true;
+			continue;
+		}
+		// find the nearby edges
+		// position and index range around Ind1
+		int chr1=vNodes[vEdges[i].Ind1].Chr;
+		int minpos1=(vEdges[i].Head1)?vNodes[vEdges[i].Ind1].Position:(vNodes[vEdges[i].Ind1].Position+vNodes[vEdges[i].Ind1].Length);
+		int maxpos1=minpos1;
+		int minidx1=vEdges[i].Ind1, maxidx1=vEdges[i].Ind1;
+		// position and index range around Ind2
+		int chr2=vNodes[vEdges[i].Ind2].Chr;
+		int minpos2=(vEdges[i].Head2)?vNodes[vEdges[i].Ind2].Position:(vNodes[vEdges[i].Ind2].Position+vNodes[vEdges[i].Ind2].Length);
+		int maxpos2=minpos2;
+		int minidx2=vEdges[i].Ind2, maxidx2=vEdges[i].Ind2;
+		// find nearby edges. 
+		// If Ind1 range of nearby edges overlap with Ind2 range, it is indicating a long-lasting concordant edge group, which we don't need to filter out.
+		bool longconcordgroup=false;
+		vector<int> NearbyIdx;
+		NearbyIdx.push_back(i);
+		for(int j=i-1; j>-1 && vNodes[vEdges[j].Ind1].Chr==chr1; j--){
+			int newpos1=(vEdges[j].Head1)? vNodes[vEdges[j].Ind1].Position:(vNodes[vEdges[j].Ind1].Position+vNodes[vEdges[j].Ind1].Length);
+			int newpos2=(vEdges[j].Head2)? vNodes[vEdges[j].Ind2].Position:(vNodes[vEdges[j].Ind2].Position+vNodes[vEdges[j].Ind2].Length);
+			if((vEdges[i].Ind1 < minidx1-Concord_Dist_Idx) || (newpos1 < minpos1-Concord_Dist_Pos))
+				break;
+			if(vEdges[j].Ind2>=minidx2-Concord_Dist_Idx && vEdges[i].Ind2<=maxidx2+Concord_Dist_Idx && newpos2>=minpos2-Concord_Dist_Pos && newpos2<=maxpos2+Concord_Dist_Pos){
+				NearbyIdx.push_back(j);
+				// update range info
+				minidx1=(vEdges[j].Ind1<minidx1)?(vEdges[j].Ind1):(minidx1);
+				minpos1=(newpos1<minpos1)?(newpos1):(minpos1);
+				minidx2=(vEdges[j].Ind2<minidx2)?(vEdges[j].Ind2):(minidx2);
+				maxidx2=(vEdges[j].Ind2>maxidx2)?(vEdges[j].Ind2):(maxidx2);
+				minpos2=(newpos2<minpos2)?(newpos2):(minpos2);
+				maxpos2=(newpos2>maxpos2)?(newpos2):(maxpos2);
+				if(maxidx1>=minidx2){
+					longconcordgroup=true;
+					break;
+				}
+			}
+		}
+		for(int j=i+1; j<vEdges.size() && vNodes[vEdges[j].Ind1].Chr==chr1; j++){
+			int newpos1=(vEdges[j].Head1)? vNodes[vEdges[j].Ind1].Position:(vNodes[vEdges[j].Ind1].Position+vNodes[vEdges[j].Ind1].Length);
+			int newpos2=(vEdges[j].Head2)? vNodes[vEdges[j].Ind2].Position:(vNodes[vEdges[j].Ind2].Position+vNodes[vEdges[j].Ind2].Length);
+			if((vEdges[j].Ind1 > maxidx1+Concord_Dist_Idx) || (newpos1 > maxpos1+Concord_Dist_Pos))
+				break;
+			if(vEdges[j].Ind2>=minidx2-Concord_Dist_Idx && vEdges[j].Ind2<=maxidx2+Concord_Dist_Idx && newpos2>=minpos2-Concord_Dist_Pos && newpos2<=maxpos2+Concord_Dist_Pos){
+				NearbyIdx.push_back(j);
+				maxidx1=(vEdges[j].Ind1>maxidx1)?(vEdges[j].Ind1):(maxidx1);
+				maxpos1=(newpos1>maxpos1)?(newpos1):(maxpos1);
+				minidx2=(vEdges[j].Ind2<minidx2)?(vEdges[j].Ind2):(minidx2);
+				maxidx2=(vEdges[j].Ind2>maxidx2)?(vEdges[j].Ind2):(maxidx2);
+				minpos2=(newpos2<minpos2)?(newpos2):(minpos2);
+				maxpos2=(newpos2>maxpos2)?(newpos2):(maxpos2);
+				if(maxidx1>=minidx2){
+					longconcordgroup=true;
+					break;
+				}
+			}
+		}
+		if(longconcordgroup){
+			for(int j=0; j<NearbyIdx.size(); j++)
+				HasInspected[NearbyIdx[j]]=true;
+			continue;
+		}
+		// for all nearby edges, Ind1 should be in the same group, Ind2 should be in the same group
+		// find what Ind1 group connects with its head and tail; same for Ind2 group
+		sort(NearbyIdx.begin(), NearbyIdx.end());
+		vector<int> Ind1GroupHead, Ind1GroupTail;
+		vector<int> Ind2GroupHead, Ind2GroupTail;
+		for(int j=0; j<NearbyIdx.size(); j++){
+			const Edge_t& e=vEdges[NearbyIdx[j]];
+			if(e.Head1)
+				Ind1GroupHead.push_back(e.Ind2);
+			else
+				Ind1GroupTail.push_back(e.Ind2);
+			if(e.Head2)
+				Ind2GroupHead.push_back(e.Ind1);
+			else
+				Ind2GroupTail.push_back(e.Ind1);
+		}
+		pair<int,int> RangeInd1Head;
+		if(Ind1GroupHead.size()>0)
+			RangeInd1Head=ExtremeValue(Ind1GroupHead.begin(), Ind1GroupHead.end());
+		pair<int,int> RangeInd1Tail;
+		if(Ind1GroupTail.size()>0)
+			RangeInd1Tail=ExtremeValue(Ind1GroupTail.begin(), Ind1GroupTail.end());
+		pair<int,int> RangeInd2Head;
+		if(Ind2GroupHead.size()>0)
+			RangeInd2Head=ExtremeValue(Ind2GroupHead.begin(), Ind2GroupHead.end());
+		pair<int,int> RangeInd2Tail;
+		if(Ind2GroupTail.size()>0)
+			RangeInd2Tail=ExtremeValue(Ind2GroupTail.begin(), Ind2GroupTail.end());
+		// for Ind1 group, if head connections and tail connections overlap, then Ind1 group is in the middle of Ind2 group
+		// if both Ind1 and Ind2 group head and tail overlap, then Ind1 is in the middle of Ind2, Ind2 is in the middle of Ind1, which means interleaving
+		bool overlapInd1=false;
+		if(Ind1GroupHead.size()>0 && Ind1GroupTail.size()>0);
+			overlapInd1=(min(RangeInd1Head.second,RangeInd1Tail.second) >= max(RangeInd1Head.first,RangeInd1Tail.first));
+		bool overlapInd2=false;
+		if(Ind2GroupHead.size()>0 && Ind2GroupTail.size()>0)
+			overlapInd2=(min(RangeInd2Head.second,RangeInd2Tail.second) >= max(RangeInd2Head.first,RangeInd2Tail.first));
+		if(overlapInd1 && overlapInd2){
+			for(int j=0; j<NearbyIdx.size(); j++)
+				KeepEdge[NearbyIdx[j]]=false;
+		}
+		for(int j=0; j<NearbyIdx.size(); j++)
+			HasInspected[NearbyIdx[j]]=true;
+	}
 };
 
-void SegmentGraph_t::FilterbyInterleaving(){
+/*void SegmentGraph_t::FilterbyInterleaving(){
 	// two types of impossible patterns: interleaving nodes; a node with head edges and tail edges overlapping a lot
 	vector<Edge_t> ImpossibleEdges; ImpossibleEdges.reserve(vEdges.size());
 	vector<Edge_t> tmpEdges; tmpEdges.resize(vEdges.size());
@@ -1976,10 +2297,10 @@ void SegmentGraph_t::FilterbyInterleaving(){
 			E2Tail=ExtremeValue(Anch2Tail.begin(), Anch2Tail.end());
 			Mean2Tail=1.0*(E2Tail.first+E2Tail.second)/2;
 		}
-		/*if((E1Head.first<=E1Tail.first && E1Head.second-E1Tail.first>1) || (E1Tail.first<=E1Head.first && E1Tail.second-E1Head.first>1))
-			whetherdelete=true;
-		else if((E2Head.first<=E2Tail.first && E2Head.second-E2Tail.first>1) || (E2Tail.first<=E2Head.first && E2Tail.second-E2Head.first>1))
-			whetherdelete=true;*/
+		// if((E1Head.first<=E1Tail.first && E1Head.second-E1Tail.first>1) || (E1Tail.first<=E1Head.first && E1Tail.second-E1Head.first>1))
+		// 	whetherdelete=true;
+		// else if((E2Head.first<=E2Tail.first && E2Head.second-E2Tail.first>1) || (E2Tail.first<=E2Head.first && E2Tail.second-E2Head.first>1))
+		// 	whetherdelete=true;
 		if(!whetherdelete){
 			for(int j=i-1; j>-1 && vEdges[j].Ind1>=vEdges[i].Ind1-Concord_Dist_Idx && vNodes[vEdges[j].Ind1].Chr==chr1 && vNodes[vEdges[j].Ind1].Position+vNodes[vEdges[j].Ind1].Length>=pos1-Concord_Dist_Pos; j--){
 				int newpos1=(vEdges[j].Head1)? vNodes[vEdges[j].Ind1].Position:(vNodes[vEdges[j].Ind1].Position+vNodes[vEdges[j].Ind1].Length);
@@ -2020,7 +2341,7 @@ void SegmentGraph_t::FilterbyInterleaving(){
 	tmpEdges.resize(distance(tmpEdges.begin(), it));
 	vEdges=tmpEdges;
 	UpdateNodeLink();
-};
+};*/
 
 int SegmentGraph_t::GroupConnection(int node, vector<Edge_t*>& Edges, int sumweight, vector<int>& Connection, vector<int>& Label){
 	Connection.clear();
@@ -2087,7 +2408,7 @@ void SegmentGraph_t::GroupSelect(int node, vector<Edge_t*>& Edges, int sumweight
 		}
 };
 
-void SegmentGraph_t::FilterEdges(){
+void SegmentGraph_t::FilterEdges(const vector<bool>& KeepEdge){
 	vector<int> BadNodes;
 	vector<Edge_t> ToDelete;
 	for(int i=0; i<vNodes.size(); i++){
@@ -2113,7 +2434,7 @@ void SegmentGraph_t::FilterEdges(){
 			headcount=GroupConnection(i, vNodes[i].HeadEdges, sumweight, HeadConn, HeadLabel);
 		if(vNodes[i].TailEdges.size()!=0)
 			tailcount=GroupConnection(i, vNodes[i].TailEdges, sumweight, TailConn, TailLabel);
-		if(headcount+tailcount>5)
+		if(headcount+tailcount >= MaxAllowedDegree)
 			BadNodes.push_back(i);
 		else{
 			if(headcount>1)
@@ -2146,7 +2467,7 @@ void SegmentGraph_t::FilterEdges(){
 			if((vEdges[i].Weight<=Min_Edge_Weight+2 && ratio>3) || (vEdges[i].Weight>Min_Edge_Weight+2 && ratio>50))
 				cond2=false;
 		}
-		if(cond1 && cond2)
+		if(KeepEdge[i] && cond1 && cond2)
 			tmpEdges.push_back(vEdges[i]);
 	}
 	tmpEdges.reserve(tmpEdges.size());
@@ -2163,6 +2484,9 @@ void SegmentGraph_t::CompressNode(){
 		LinkedNode.push_back(it->Ind1);
 		LinkedNode.push_back(it->Ind2);
 	}
+	if(LinkedNode.size()==0)
+		cout<<"Error: 0 nodes are connected by edges.\n";
+	assert(LinkedNode.size()!=0);
 	sort(LinkedNode.begin(), LinkedNode.end());
 	vector<int>::iterator endit=unique(LinkedNode.begin(), LinkedNode.end());
 	LinkedNode.resize(distance(LinkedNode.begin(), endit));
@@ -2637,6 +2961,13 @@ void SegmentGraph_t::MultiplyDisEdges(){
 	}
 };
 
+void SegmentGraph_t::DeMultiplyDisEdges(){
+	for(vector<Edge_t>::iterator it=vEdges.begin(); it!=vEdges.end(); it++){
+		if(IsDiscordant(*it) && DiscordantRatio!=1)
+			it->Weight=(int)it->Weight/DiscordantRatio;
+	}
+};
+
 void SegmentGraph_t::ExactBreakpoint(SBamrecord_t& Chimrecord, map<Edge_t, vector< pair<int,int> > >& ExactBP){
 	ExactBP.clear();
 	int firstfrontindex=0;
@@ -2697,8 +3028,148 @@ void SegmentGraph_t::ExactBreakpoint(SBamrecord_t& Chimrecord, map<Edge_t, vecto
 		}
 	}
 	for(map<Edge_t, vector< pair<int,int> > >::iterator it=ExactBP.begin(); it!=ExactBP.end(); it++){
-		CountTop(it->second);
+		CountTop(it->first, it->second);
 	}
+};
+
+void SegmentGraph_t::ExactBPConcordantSupport(string Input_BAM, SBamrecord_t& Chimrecord, const map<Edge_t, vector< pair<int,int> > >& ExactBP, map<Edge_t, vector< pair<int,int> > >& ExactBP_concord_support){
+	// this function is to count the number of concordant fragments at each exact breakpoint position. 
+	// Fragment refers to paired-end reads. Insertion in the middle of paired-end reads also count for coverage.
+	// extract the Chr and position information for each exact breakpoint in TSVs
+	time_t CurrentTime;
+	string CurrentTimeStr;
+	ExactBP_concord_support.clear();
+
+	vector< pair<int,int> > BPs; // <Chr, Position>
+	for(vector<Edge_t>::iterator itedge = vEdges.begin(); itedge!=vEdges.end(); itedge++){
+		map<Edge_t, vector< pair<int,int> > >::const_iterator itmap = ExactBP.find(*itedge);
+		if(itmap!=ExactBP.cend() && itmap->second.size()!=0){
+			for(vector< pair<int,int> >::const_iterator itpos=itmap->second.cbegin(); itpos!=itmap->second.cend(); itpos++){
+				BPs.push_back(make_pair(vNodes[(itmap->first).Ind1].Chr, itpos->first));
+				BPs.push_back(make_pair(vNodes[(itmap->first).Ind2].Chr, itpos->second));
+			}
+		}
+		else{
+			BPs.push_back( make_pair(vNodes[itedge->Ind1].Chr, vNodes[itedge->Ind1].Position) );
+			if(!itedge->Head1)
+				BPs.back().second += vNodes[itedge->Ind1].Length;
+			BPs.push_back( make_pair(vNodes[itedge->Ind2].Chr, vNodes[itedge->Ind2].Position) );
+			if(!itedge->Head2)
+				BPs.back().second += vNodes[itedge->Ind2].Length;
+		}
+	}
+	sort(BPs.begin(), BPs.end(), [](pair<int,int> a, pair<int,int> b){if(a.first!=b.first) return a.first<b.first; else return a.second<b.second;} );
+
+	// Extract the names of chimeric alignments, since some chimeric alignments also have a record in concordant bam
+	vector<string> ChimName(Chimrecord.size());
+	for(SBamrecord_t::const_iterator it=Chimrecord.cbegin(); it!=Chimrecord.cend(); it++)
+		ChimName.push_back(it->Qname);
+	sort(ChimName.begin(), ChimName.end());
+	vector<string>::iterator it=unique(ChimName.begin(), ChimName.end());
+	ChimName.resize(distance(ChimName.begin(), it));
+
+	// output time info
+	time(&CurrentTime);
+	CurrentTimeStr=ctime(&CurrentTime);
+	cout<<"["<<CurrentTimeStr.substr(0, CurrentTimeStr.size()-1)<<"] Calculating concordant fragment coverage of breakpoints."<<endl;
+	// read concordang bamfile, and calculate the coverage info
+	vector<int> Coverages(BPs.size(), 0);
+	int indBP = 0;
+	BamReader bamreader; bamreader.Open(Input_BAM);
+	if(bamreader.IsOpen()){
+		BamAlignment record;
+		while(bamreader.GetNextAlignment(record)){
+			// only considers uniquely mapped reads
+			bool XAtag=record.HasTag("XA");
+			bool IHtag=record.HasTag("IH");
+			int IHtagvalue=0;
+			if(IHtag)
+				record.GetTag("IH", IHtagvalue);
+			if(XAtag || IHtagvalue>1 || record.MapQuality<Min_MapQual || record.IsDuplicate() || !record.IsMapped() || record.RefID==-1 || binary_search(ChimName.begin(), ChimName.end(), record.Name))
+				continue;
+			// To remove re-counting for the same paired-end reads, only considers the alignment record to the right
+			if(record.IsMateMapped() && record.MateRefID==record.RefID && record.MatePosition>record.Position)
+				continue;
+			else if(record.IsMateMapped() && record.MateRefID==record.RefID && record.MatePosition==record.Position && record.IsSecondMate())
+				continue;
+			// check whether the current BP index is already at the end
+			if(indBP == BPs.size())
+				break;
+			// collect information of the alignment
+			int alignChr = record.RefID;
+			int alignStart = record.Position;
+			int alignEnd = record.GetEndPosition();
+			if(record.IsMateMapped() && record.MateRefID==record.RefID){
+				if(alignStart < record.MatePosition)
+					cout<<"Error: not the right alignment\t"<<alignStart<<"\t"<<record.MatePosition<<endl;
+				assert(alignStart >= record.MatePosition);
+				alignStart = record.MatePosition;
+			}
+			// compare to current BP
+			if(alignChr > BPs[indBP].first || (alignChr == BPs[indBP].first && alignStart > BPs[indBP].second+Concord_Dist_Pos))
+				indBP ++;
+			for(int indBP2 = indBP; indBP2 < BPs.size(); indBP2++){
+				if(alignChr == BPs[indBP2].first && alignStart <= BPs[indBP2].second && alignEnd > BPs[indBP2].second){
+					Coverages[indBP2] ++;
+				}
+				else if(alignChr < BPs[indBP2].first || (alignChr == BPs[indBP2].first && alignEnd <= BPs[indBP2].second))
+					break;
+			}
+		}
+	}
+	bamreader.Close();
+
+	// add the coverage for pair of breakpoints of each edge
+	for(vector<Edge_t>::iterator itedge=vEdges.begin(); itedge!=vEdges.end(); itedge++){
+		map<Edge_t, vector< pair<int,int> > >::const_iterator itmap = ExactBP.find(*itedge);
+		vector< pair<int,int> > supports;
+		if(itmap!=ExactBP.cend() && itmap->second.size()!=0){
+			for(vector< pair<int,int> >::const_iterator itpos=itmap->second.cbegin(); itpos!=itmap->second.cend(); itpos++){
+				pair<int,int> bp1 = make_pair(vNodes[(itmap->first).Ind1].Chr, itpos->first);
+				pair<int,int> bp2 = make_pair(vNodes[(itmap->first).Ind2].Chr, itpos->second);
+				// find indexes in vector BPs
+				vector< pair<int,int> >::iterator it1 = lower_bound(BPs.begin(), BPs.end(), bp1, [](pair<int,int> a, pair<int,int> b){if(a.first!=b.first) return a.first<b.first; else return a.second<b.second;} );
+				if(it1==BPs.end() || it1->first!=bp1.first || it1->second!=bp1.second)
+					cout<<"Error: not finding breakpoint\t("<<(bp1.first)<<","<<(bp1.second)<<")\n";
+				assert(it1!=BPs.end() && it1->first == bp1.first && it1->second == bp1.second);
+				vector< pair<int,int> >::iterator it2 = lower_bound(BPs.begin(), BPs.end(), bp2, [](pair<int,int> a, pair<int,int> b){if(a.first!=b.first) return a.first<b.first; else return a.second<b.second;} );
+				if(it2==BPs.end() || it2->first!=bp2.first || it2->second!=bp2.second)
+					cout<<"Error: not finding breakpoint\t("<<(bp2.first)<<","<<(bp2.second)<<")\n";
+				assert(it2!=BPs.end() && it2->first == bp2.first && it2->second == bp2.second);
+				// pushing support map
+				supports.push_back(make_pair(Coverages[distance(BPs.begin(),it1)], Coverages[distance(BPs.begin(),it2)]));
+			}
+		}
+		else{
+			pair<int,int> bp1 = make_pair(vNodes[itedge->Ind1].Chr, vNodes[itedge->Ind1].Position);
+			if(!itedge->Head1)
+				bp1.second += vNodes[itedge->Ind1].Length;
+			pair<int,int> bp2 = make_pair(vNodes[itedge->Ind2].Chr, vNodes[itedge->Ind2].Position);
+			if(!itedge->Head2)
+				bp2.second += vNodes[itedge->Ind2].Length;
+			// find indexes in vector BPs
+			vector< pair<int,int> >::iterator it1 = lower_bound(BPs.begin(), BPs.end(), bp1, [](pair<int,int> a, pair<int,int> b){if(a.first!=b.first) return a.first<b.first; else return a.second<b.second;} );
+			if(it1==BPs.end() || it1->first!=bp1.first || it1->second!=bp1.second)
+				cout<<"Error: not finding breakpoint\t("<<(bp1.first)<<","<<(bp1.second)<<")\n";
+			assert(it1!=BPs.end() && it1->first == bp1.first && it1->second == bp1.second);
+			vector< pair<int,int> >::iterator it2 = lower_bound(BPs.begin(), BPs.end(), bp2, [](pair<int,int> a, pair<int,int> b){if(a.first!=b.first) return a.first<b.first; else return a.second<b.second;} );
+			if(it2==BPs.end() || it2->first!=bp2.first || it2->second!=bp2.second)
+				cout<<"Error: not finding breakpoint\t("<<(bp2.first)<<","<<(bp2.second)<<")\n";
+			assert(it2!=BPs.end() && it2->first == bp2.first && it2->second == bp2.second);
+			// pushing support map
+			supports.push_back(make_pair(Coverages[distance(BPs.begin(),it1)], Coverages[distance(BPs.begin(),it2)]));
+		}
+		ExactBP_concord_support[*itedge] = supports;
+	}
+
+	// sanity check
+	if(ExactBP_concord_support.size() != vEdges.size())
+		cout<<"Error: edges in concordant support keys is more than edges in segment graph.\n";
+
+	// output time info
+	time(&CurrentTime);
+	CurrentTimeStr=ctime(&CurrentTime);
+	cout<<"["<<CurrentTimeStr.substr(0, CurrentTimeStr.size()-1)<<"] Finish calculating concordant fragment coverage of breakpoints."<<endl;
 };
 
 void SegmentGraph_t::OutputGraph(string outputfile){
@@ -2736,7 +3207,7 @@ vector< vector<int> > SegmentGraph_t::Ordering(){
 			BestOrders[i].push_back(CompNodes.begin()->first+1);
 			continue;
 		}
-		//cout<<"component "<<i<<endl;
+		//cout<<"component "<<i<<"\t"<<CompNodes.size()<<endl;
 		BestOrders[i]=MincutRecursion(CompNodes, CompEdges);
 	}
 	return BestOrders;
@@ -2749,13 +3220,8 @@ vector<int> SegmentGraph_t::MincutRecursion(std::map<int,int> CompNodes, vector<
 		BestOrder.push_back(it->first+1);
 		return BestOrder;
 	}
-	else if(CompNodes.size()<40){
+	else if(CompNodes.size()<20){
 		vector<int> BestOrder(CompNodes.size(), 0);
-		GRBEnv env=GRBEnv();
-		GRBModel model=GRBModel(env);
-		model.getEnv().set(GRB_IntParam_LogToConsole, 0);
-		model.getEnv().set(GRB_DoubleParam_TimeLimit, 300.0);
-		vector<GRBVar> vGRBVar;
 		int edgeidx=0;
 		std::map<int,int>::iterator itnodeend=CompNodes.end(); itnodeend--;
 		for(std::map<int,int>::iterator itnode=CompNodes.begin(); itnode!=itnodeend; itnode++){
@@ -2770,26 +3236,32 @@ vector<int> SegmentGraph_t::MincutRecursion(std::map<int,int> CompNodes, vector<
 				CompEdges.push_back(tmp);
 			}
 		}
-		GenerateILP(CompNodes, CompEdges, env, model, vGRBVar);
-		model.optimize();
 		vector< vector<int> > Z; Z.resize(CompNodes.size());
-		int count=0;
+		vector<int> X; X.resize(CompNodes.size(), 1);
 		for(int j=0; j<Z.size(); j++){
-			Z[j].resize(CompNodes.size(), 0);
-			for(int k=j+1; k<CompNodes.size(); k++){
-				Z[j][k]=(int)vGRBVar[(int)CompNodes.size()+(int)CompEdges.size()+count].get(GRB_DoubleAttr_X);
-				count++;
-			}
+			Z[j].resize(j+1, 0);
+			Z[j].resize(CompNodes.size(), 1);
 		}
-		for(int j=0; j<Z.size(); j++)
-			for(int k=0; k<j; k++)
-				Z[j][k]=1-Z[k][j];
+		GenerateILP(CompNodes, CompEdges, Z, X);
+
 		for(std::map<int,int>::iterator it=CompNodes.begin(); it!=CompNodes.end(); it++){
 			int pos=CompNodes.size();
 			for(int k=0; k<Z.size(); k++)
 				pos-=Z[it->second][k];
-			BestOrder[pos-1]=(vGRBVar[it->second].get(GRB_DoubleAttr_X)>0.5)?(it->first+1):(-it->first-1);
+			BestOrder[pos-1]=(X[it->second]>0.5)?(it->first+1):(-it->first-1);
 		}
+
+		// verify
+		vector<int> tmp1, tmp2;
+		for(int i=0; i<BestOrder.size(); i++)
+			tmp1.push_back(abs(BestOrder[i])-1);
+		sort(tmp1.begin(), tmp1.end());
+		for(map<int,int>::iterator it=CompNodes.begin(); it!=CompNodes.end(); it++)
+			tmp2.push_back(it->first);
+		sort(tmp2.begin(), tmp2.end());
+		assert(tmp1.size()==tmp2.size());
+		for(int i=0; i<tmp1.size(); i++)
+			assert(tmp1[i]==tmp2[i]);
 		return BestOrder;
 	}
 	else{
@@ -2805,11 +3277,6 @@ vector<int> SegmentGraph_t::MincutRecursion(std::map<int,int> CompNodes, vector<
 		int w = boost::stoer_wagner_min_cut(g, get(boost::edge_weight, g), boost::parity_map(parities));
 		if(w>1){
 			vector<int> BestOrder(CompNodes.size(), 0);
-			GRBEnv env=GRBEnv();;
-			GRBModel model=GRBModel(env);
-			model.getEnv().set(GRB_IntParam_LogToConsole, 0);
-			model.getEnv().set(GRB_DoubleParam_TimeLimit, 300.0);
-			vector<GRBVar> vGRBVar;
 			int edgeidx=0;
 			std::map<int,int>::iterator itnodeend=CompNodes.end(); itnodeend--;
 			for(std::map<int,int>::iterator itnode=CompNodes.begin(); itnode!=itnodeend; itnode++){
@@ -2824,26 +3291,33 @@ vector<int> SegmentGraph_t::MincutRecursion(std::map<int,int> CompNodes, vector<
 					CompEdges.push_back(tmp);
 				}
 			}
-			GenerateILP(CompNodes, CompEdges, env, model, vGRBVar);
-			model.optimize();
 			vector< vector<int> > Z; Z.resize(CompNodes.size());
-			int count=0;
+			vector<int> X; X.resize(CompNodes.size(), 1);
 			for(int j=0; j<Z.size(); j++){
-				Z[j].resize(CompNodes.size(), 0);
-				for(int k=j+1; k<CompNodes.size(); k++){
-					Z[j][k]=(int)vGRBVar[(int)CompNodes.size()+(int)CompEdges.size()+count].get(GRB_DoubleAttr_X);
-					count++;
-				}
+				Z[j].resize(j+1, 0);
+				Z[j].resize(CompNodes.size(), 1);
 			}
-			for(int j=0; j<Z.size(); j++)
-				for(int k=0; k<j; k++)
-					Z[j][k]=1-Z[k][j];
+			GenerateILP(CompNodes, CompEdges, Z, X);
+			// GenerateSqueezedILP(CompNodes, CompEdges, Z, X);
+
 			for(std::map<int,int>::iterator it=CompNodes.begin(); it!=CompNodes.end(); it++){
 				int pos=CompNodes.size();
 				for(int k=0; k<Z.size(); k++)
 					pos-=Z[it->second][k];
-				BestOrder[pos-1]=(vGRBVar[it->second].get(GRB_DoubleAttr_X)>0.5)?(it->first+1):(-it->first-1);
+				BestOrder[pos-1]=(X[it->second]>0.5)?(it->first+1):(-it->first-1);
 			}
+	
+			// verify
+			vector<int> tmp1, tmp2;
+			for(int i=0; i<BestOrder.size(); i++)
+				tmp1.push_back(abs(BestOrder[i])-1);
+			sort(tmp1.begin(), tmp1.end());
+			for(map<int,int>::iterator it=CompNodes.begin(); it!=CompNodes.end(); it++)
+				tmp2.push_back(it->first);
+			sort(tmp2.begin(), tmp2.end());
+			assert(tmp1.size()==tmp2.size());
+			for(int i=0; i<tmp1.size(); i++)
+				assert(tmp1[i]==tmp2[i]);
 			return BestOrder;
 		}
 		else{
@@ -2928,79 +3402,494 @@ vector<int> SegmentGraph_t::MincutRecursion(std::map<int,int> CompNodes, vector<
 	}
 };
 
-void SegmentGraph_t::GenerateILP(std::map<int,int>& CompNodes, vector<Edge_t>& CompEdges, GRBEnv& env, GRBModel& model, vector<GRBVar>& vGRBVar){
-	vector<string> nodenames, edgenames, pairnodenames;
-	int nodeoffset=0, edgeoffset=CompNodes.size(), pairoffset=CompNodes.size()+CompEdges.size();
-	for(int i=0; i<CompNodes.size(); i++){
-		nodenames.push_back("y"+to_string(i));
-		for(int j=i+1; j<CompNodes.size(); j++)
-			pairnodenames.push_back("z"+to_string(i)+to_string(j));
+void SegmentGraph_t::GenerateSqueezedILP(map<int,int>& CompNodes, vector<Edge_t>& CompEdges, vector< vector<int> >& Z, vector<int>& X){
+	glp_prob *mip=glp_create_prob();
+	glp_set_prob_name(mip, "GSG");
+	glp_set_obj_dir(mip, GLP_MAX);
+
+	// For a node, if one edge out-weigh the sum of rest edges, then this edge must be satisfied
+	// If an optimal solution doesn't satisfy this edge, then take out the node alone and insert it as indicated by the dominating edge, 
+	// will create a better optimal solution
+	// Select those edges
+	vector<Edge_t> ImportantEdges;
+	vector<Edge_t> OtherEdges;
+	for(map<int,int>::iterator it=CompNodes.begin(); it!=CompNodes.end(); it++){
+		int maxweight=0;
+		int sumweight=0;
+		Edge_t maxedge;
+		for(vector<Edge_t*>::iterator itedge=vNodes[it->first].HeadEdges.begin(); itedge!=vNodes[it->first].HeadEdges.end(); itedge++){
+			sumweight+=(*itedge)->Weight;
+			if((*itedge)->Weight>maxweight){
+				maxweight=(*itedge)->Weight;
+				maxedge=(**itedge);
+			}
+		}
+		if(maxweight*2>sumweight)
+			ImportantEdges.push_back(maxedge);
 	}
-	for(int i=0; i<CompEdges.size(); i++)
-		edgenames.push_back("x"+to_string(i));
-	// In all variables, node first, edge second, pairorder last
-	for(int i=0; i<nodenames.size(); i++){
-		GRBVar tmp=model.addVar(0.0, 1.0, 0.0, GRB_BINARY, nodenames[i]);
-		vGRBVar.push_back(tmp);
+	sort(ImportantEdges.begin(), ImportantEdges.end()); // one property for ImportantEdges is that there is no cycle, do I need to check that in code XXX
+	for(vector<Edge_t>::iterator it=CompEdges.begin(); it!=CompEdges.end(); it++)
+		if(!binary_search(ImportantEdges.begin(), ImportantEdges.end(), (*it)))
+			OtherEdges.push_back((*it));
+	// process important edge list incident to each nodes (important edges sharing ndoes)
+	map<int, vector<int> > IncidentEdges;
+	for(int i=0; i<ImportantEdges.size(); i++){
+		const Edge_t& e=ImportantEdges[i];
+		if(IncidentEdges.find(e.Ind1)!=IncidentEdges.end())
+			IncidentEdges[e.Ind1].push_back(i);
+		else{
+			vector<int> tmp;
+			tmp.push_back(i);
+			IncidentEdges[e.Ind1]=tmp;
+		}
+		if(IncidentEdges.find(e.Ind2)!=IncidentEdges.end())
+			IncidentEdges[e.Ind2].push_back(i);
+		else{
+			vector<int> tmp;
+			tmp.push_back(i);
+			IncidentEdges[e.Ind2]=tmp;
+		}
 	}
-	for(int i=0; i<edgenames.size(); i++){
-		GRBVar tmp=model.addVar(0.0, 1.0, CompEdges[i].Weight, GRB_BINARY, edgenames[i]);
-		vGRBVar.push_back(tmp);
+	int count=0;
+	// create variables for other edges
+	map<int, pair<bool, int> > OtherEdgesVar;
+	for(int i=0; i<OtherEdges.size(); i++){
+		OtherEdgesVar[i]=make_pair(true, count);
+		count++;
 	}
-	int count=0, previndex=0;
-	for(int i=0; i<pairnodenames.size(); i++){
-		GRBVar tmp=model.addVar(0.0, 1.0, 0.0, GRB_BINARY, pairnodenames[i]);
-		vGRBVar.push_back(tmp);
+	// create variables for nodes/positions of import edges
+	map<int, pair<bool, int> > Orientation; // node index to <original (true) or 1-original (false), variable index>
+	map< pair<int,int>, pair<bool,int> > RelativePos; // pair of node indexes to <original (true) or 1-original (false), variable index>
+	for(vector<Edge_t>::iterator it=ImportantEdges.begin(); it!=ImportantEdges.end(); it++){
+		map< pair<int,int>, pair<bool,int> >::iterator itrela=RelativePos.find(make_pair(it->Ind1, it->Ind2));
+		if(itrela==RelativePos.end()){
+			vector<int> UncheckedNodes;
+			UncheckedNodes.push_back(it->Ind1);
+			Orientation[it->Ind1]=make_pair(true, count);
+			while(UncheckedNodes.size()!=0){
+				int nodeind=UncheckedNodes.back();
+				UncheckedNodes.pop_back();
+				for(int i=0; i<IncidentEdges[nodeind].size(); i++){
+					const Edge_t& e=CompEdges[IncidentEdges[nodeind][i]];
+					if(RelativePos.find(make_pair(e.Ind1, e.Ind2))!=RelativePos.end()){
+						int othernodeind=(e.Ind1==nodeind)?e.Ind2:e.Ind1;
+						UncheckedNodes.push_back(othernodeind);
+						Orientation[othernodeind]=Orientation[nodeind];
+						RelativePos[make_pair(e.Ind1, e.Ind2)]=Orientation[nodeind];
+						if(!e.Head1 && e.Head2){
+							// nothing need to change
+						}
+						else if(e.Head1 && e.Head2){
+							Orientation[othernodeind].first=!Orientation[nodeind].first;
+							if(othernodeind==e.Ind2)
+								RelativePos[make_pair(nodeind, othernodeind)].first=!RelativePos[make_pair(nodeind, othernodeind)].first;
+						}
+						else if(e.Head1 && !e.Head2){
+							RelativePos[make_pair(e.Ind1, e.Ind2)].first=!RelativePos[make_pair(e.Ind1, e.Ind2)].first;
+						}
+						else{
+							Orientation[othernodeind].first=!Orientation[nodeind].first;
+							if(othernodeind==e.Ind1)
+								RelativePos[make_pair(othernodeind, nodeind)].first=!RelativePos[make_pair(othernodeind, nodeind)].first;
+						}
+					}
+				}
+			}
+			count++;
+		}
 	}
-	model.update();
-	model.set(GRB_IntAttr_ModelSense, GRB_MAXIMIZE);
+	// create variables for the rest nodes
+	vector<int> OldCompNodes(CompNodes.size());
+	for(map<int,int>::iterator it=CompNodes.begin(); it!=CompNodes.end(); it++)
+		OldCompNodes[it->second]=it->first;
+	for(vector<int>::iterator it=OldCompNodes.begin(); it!=OldCompNodes.end(); it++)
+		if(Orientation.find(*it)==Orientation.end()){
+			Orientation[*it]=make_pair(true, count);
+			count++;
+		}
+	// create variable for the rest node pairs
+	for(vector<int>::iterator it1=OldCompNodes.begin(); it1!=OldCompNodes.end(); it1++)
+		for(vector<int>::iterator it2=(it1+1); it2!=OldCompNodes.end(); it2++)
+			if(RelativePos.find(make_pair(*it1, *it2))==RelativePos.end()){
+				RelativePos[make_pair(*it1, *it2)]=make_pair(true, count);
+				count++;
+			}
+
+	glp_add_cols(mip, count);
+	for(int i=0; i<OtherEdges.size(); i++){
+		glp_set_col_name(mip, i+1, ("x"+to_string(i)).c_str());
+		glp_set_col_bnds(mip, i+1, GLP_DB, 0, 1);
+		glp_set_obj_coef(mip, i+1, OtherEdges[i].Weight);
+		glp_set_col_kind(mip, i+1, GLP_BV);
+	}
+	for(int i=OtherEdges.size(); i<count; i++){
+		glp_set_col_name(mip, i+1, ("v"+to_string(i)).c_str());
+		glp_set_col_bnds(mip, i+1, GLP_DB, 0, 1);
+		glp_set_obj_coef(mip, i+1, 0);
+		glp_set_col_kind(mip, i+1, GLP_BV);
+	}
+
+	// initialize glpk matrix
+	int* ia=new int[12*OtherEdges.size()+(CompNodes.size())*(CompNodes.size()-1)*(CompNodes.size()-2)/2+1];
+	int *ja=new int[12*OtherEdges.size()+(CompNodes.size())*(CompNodes.size()-1)*(CompNodes.size()-2)/2+1];
+	double* ar=new double[12*OtherEdges.size()+(CompNodes.size())*(CompNodes.size()-1)*(CompNodes.size()-2)/2+1];
+	glp_add_rows(mip, 4*(int)OtherEdges.size()+(CompNodes.size())*(CompNodes.size()-1)*(CompNodes.size()-2)/6);
+
+	count=0;
+	for(int i=0; i<OtherEdges.size(); i++){
+		int pairind=RelativePos[make_pair(OtherEdges[i].Ind1, OtherEdges[i].Ind2)].second;
+		if(!OtherEdges[i].Head1 && OtherEdges[i].Head2){
+			glp_set_row_name(mip, i*4+1, ("c"+to_string(i*4+1)).c_str());
+			glp_set_row_bnds(mip, i*4+1, GLP_UP, -3, 1+1-(int)Orientation[OtherEdges[i].Ind1].first-1+(int)Orientation[OtherEdges[i].Ind2].first);
+			ia[count+1]=i*4+1; ja[count+1]=OtherEdgesVar[i].second+1; ar[count+1]=1;
+			ia[count+2]=i*4+1; ja[count+2]=Orientation[OtherEdges[i].Ind1].second+1; ar[count+2]=(Orientation[OtherEdges[i].Ind1].first)?-1:1;
+			ia[count+3]=i*4+1; ja[count+3]=Orientation[OtherEdges[i].Ind2].second+1; ar[count+3]=(Orientation[OtherEdges[i].Ind2].first)?1:-1;
+
+			glp_set_row_name(mip, i*4+2, ("c"+to_string(i*4+2)).c_str());
+			glp_set_row_bnds(mip, i*4+2, GLP_UP, -3, 1-1+(int)Orientation[OtherEdges[i].Ind1].first+1-(int)Orientation[OtherEdges[i].Ind2].first);
+			ia[count+4]=i*4+2; ja[count+4]=OtherEdgesVar[i].second+1; ar[count+4]=1;
+			ia[count+5]=i*4+2; ja[count+5]=Orientation[OtherEdges[i].Ind1].second+1; ar[count+5]=(Orientation[OtherEdges[i].Ind1].first)?1:-1;
+			ia[count+6]=i*4+2; ja[count+6]=Orientation[OtherEdges[i].Ind2].second+1; ar[count+6]=(Orientation[OtherEdges[i].Ind2].first)?-1:1;
+
+			glp_set_row_name(mip, i*4+3, ("c"+to_string(i*4+3)).c_str());
+			glp_set_row_bnds(mip, i*4+3, GLP_UP, -3, 1+1-(int)RelativePos[make_pair(OtherEdges[i].Ind1, OtherEdges[i].Ind2)].first-1+(int)Orientation[OtherEdges[i].Ind1].first);
+			ia[count+7]=i*4+3; ja[count+7]=OtherEdgesVar[i].second+1; ar[count+7]=1;
+			ia[count+8]=i*4+3; ja[count+8]=pairind+1; ar[count+8]=(RelativePos[make_pair(OtherEdges[i].Ind1, OtherEdges[i].Ind2)].first)?-1:1;
+			ia[count+9]=i*4+3; ja[count+9]=Orientation[OtherEdges[i].Ind1].second+1; ar[count+9]=(Orientation[OtherEdges[i].Ind1].first)?1:-1;
+
+			glp_set_row_name(mip, i*4+4, ("c"+to_string(i*4+4)).c_str());
+			glp_set_row_bnds(mip, i*4+4, GLP_UP, -3, 1-1+(int)RelativePos[make_pair(OtherEdges[i].Ind1, OtherEdges[i].Ind2)].first+1-(int)Orientation[OtherEdges[i].Ind1].first);
+			ia[count+10]=i*4+4; ja[count+10]=OtherEdgesVar[i].second+1; ar[count+10]=1;
+			ia[count+11]=i*4+4; ja[count+11]=pairind+1; ar[count+11]=(RelativePos[make_pair(OtherEdges[i].Ind1, OtherEdges[i].Ind2)].first)?1:-1;
+			ia[count+12]=i*4+4; ja[count+12]=Orientation[OtherEdges[i].Ind1].second+1; ar[count+12]=(Orientation[OtherEdges[i].Ind1].first)?-1:1;
+		}
+		else if(OtherEdges[i].Head1 && OtherEdges[i].Head2){
+			glp_set_row_name(mip, i*4+1, ("c"+to_string(i*4+1)).c_str());
+			glp_set_row_bnds(mip, i*4+1, GLP_UP, -3, 1-(int)Orientation[OtherEdges[i].Ind1].first+1-(int)Orientation[OtherEdges[i].Ind2].first);
+			ia[count+1]=i*4+1; ja[count+1]=OtherEdgesVar[i].second+1; ar[count+1]=1;
+			ia[count+2]=i*4+1; ja[count+2]=Orientation[OtherEdges[i].Ind1].second+1; ar[count+2]=(Orientation[OtherEdges[i].Ind1].first)?-1:1;
+			ia[count+3]=i*4+1; ja[count+3]=Orientation[OtherEdges[i].Ind2].second+1; ar[count+3]=(Orientation[OtherEdges[i].Ind2].first)?-1:1;
+
+			glp_set_row_name(mip, i*4+2, ("c"+to_string(i*4+2)).c_str());
+			glp_set_row_bnds(mip, i*4+2, GLP_UP, -3, 2-1+(int)Orientation[OtherEdges[i].Ind1].first-1+(int)Orientation[OtherEdges[i].Ind2].first);
+			ia[count+4]=i*4+2; ja[count+4]=OtherEdgesVar[i].second+1; ar[count+4]=1;
+			ia[count+5]=i*4+2; ja[count+5]=Orientation[OtherEdges[i].Ind1].second+1; ar[count+5]=(Orientation[OtherEdges[i].Ind1].first)?1:-1;
+			ia[count+6]=i*4+2; ja[count+6]=Orientation[OtherEdges[i].Ind2].second+1; ar[count+6]=(Orientation[OtherEdges[i].Ind2].first)?1:-1;
+
+			glp_set_row_name(mip, i*4+3, ("c"+to_string(i*4+3)).c_str());
+			glp_set_row_bnds(mip, i*4+3, GLP_UP, -3, 1+1-(int)RelativePos[make_pair(OtherEdges[i].Ind1, OtherEdges[i].Ind2)].first-1+(int)Orientation[OtherEdges[i].Ind2].first);
+			ia[count+7]=i*4+3; ja[count+7]=OtherEdgesVar[i].second+1; ar[count+7]=1;
+			ia[count+8]=i*4+3; ja[count+8]=pairind+1; ar[count+8]=(RelativePos[make_pair(OtherEdges[i].Ind1, OtherEdges[i].Ind2)].first)?-1:1;
+			ia[count+9]=i*4+3; ja[count+9]=Orientation[OtherEdges[i].Ind2].second+1; ar[count+9]=(Orientation[OtherEdges[i].Ind2].first)?1:-1;
+
+			glp_set_row_name(mip, i*4+4, ("c"+to_string(i*4+4)).c_str());
+			glp_set_row_bnds(mip, i*4+4, GLP_UP, -3, 1-1+(int)RelativePos[make_pair(OtherEdges[i].Ind1, OtherEdges[i].Ind2)].first+1-(int)Orientation[OtherEdges[i].Ind2].first);
+			ia[count+10]=i*4+4; ja[count+10]=OtherEdgesVar[i].second+1; ar[count+10]=1;
+			ia[count+11]=i*4+4; ja[count+11]=pairind+1; ar[count+11]=(RelativePos[make_pair(OtherEdges[i].Ind1, OtherEdges[i].Ind2)].first)?1:-1;
+			ia[count+12]=i*4+4; ja[count+12]=Orientation[OtherEdges[i].Ind2].second+1; ar[count+12]=(Orientation[OtherEdges[i].Ind2].first)?-1:1;
+		}
+		else if(!OtherEdges[i].Head1 && !OtherEdges[i].Head2){
+			glp_set_row_name(mip, i*4+1, ("c"+to_string(i*4+1)).c_str());
+			glp_set_row_bnds(mip, i*4+1, GLP_UP, -3, 0+1-(int)Orientation[OtherEdges[i].Ind1].first+1-(int)Orientation[OtherEdges[i].Ind2].first);
+			ia[count+1]=i*4+1; ja[count+1]=OtherEdgesVar[i].second+1; ar[count+1]=1;
+			ia[count+2]=i*4+1; ja[count+2]=Orientation[OtherEdges[i].Ind1].second+1; ar[count+2]=(Orientation[OtherEdges[i].Ind1].first)?-1:1;
+			ia[count+3]=i*4+1; ja[count+3]=Orientation[OtherEdges[i].Ind2].second+1; ar[count+3]=(Orientation[OtherEdges[i].Ind2].first)?-1:1;
+
+			glp_set_row_name(mip, i*4+2, ("c"+to_string(i*4+2)).c_str());
+			glp_set_row_bnds(mip, i*4+2, GLP_UP, -3, 2-1+(int)Orientation[OtherEdges[i].Ind1].first-1+(int)Orientation[OtherEdges[i].Ind2].first);
+			ia[count+4]=i*4+2; ja[count+4]=OtherEdgesVar[i].second+1; ar[count+4]=1;
+			ia[count+5]=i*4+2; ja[count+5]=Orientation[OtherEdges[i].Ind1].second+1; ar[count+5]=(Orientation[OtherEdges[i].Ind1].first)?1:-1;
+			ia[count+6]=i*4+2; ja[count+6]=Orientation[OtherEdges[i].Ind2].second+1; ar[count+6]=(Orientation[OtherEdges[i].Ind2].first)?1:-1;
+
+			glp_set_row_name(mip, i*4+3, ("c"+to_string(i*4+3)).c_str());
+			glp_set_row_bnds(mip, i*4+3, GLP_UP, -3, 1+1-(int)RelativePos[make_pair(OtherEdges[i].Ind1, OtherEdges[i].Ind2)].first-1+(int)Orientation[OtherEdges[i].Ind1].first);
+			ia[count+7]=i*4+3; ja[count+7]=OtherEdgesVar[i].second+1; ar[count+7]=1;
+			ia[count+8]=i*4+3; ja[count+8]=pairind+1; ar[count+8]=(RelativePos[make_pair(OtherEdges[i].Ind1, OtherEdges[i].Ind2)].first)?-1:1;
+			ia[count+9]=i*4+3; ja[count+9]=Orientation[OtherEdges[i].Ind1].second+1; ar[count+9]=(Orientation[OtherEdges[i].Ind1].first)?1:-1;
+
+			glp_set_row_name(mip, i*4+4, ("c"+to_string(i*4+4)).c_str());
+			glp_set_row_bnds(mip, i*4+4, GLP_UP, -3, 1-1+(int)RelativePos[make_pair(OtherEdges[i].Ind1, OtherEdges[i].Ind2)].first+1-(int)Orientation[OtherEdges[i].Ind1].first);
+			ia[count+10]=i*4+4; ja[count+10]=OtherEdgesVar[i].second+1; ar[count+10]=1;
+			ia[count+11]=i*4+4; ja[count+11]=pairind+1; ar[count+11]=(RelativePos[make_pair(OtherEdges[i].Ind1, OtherEdges[i].Ind2)].first)?1:-1;
+			ia[count+12]=i*4+4; ja[count+12]=Orientation[OtherEdges[i].Ind1].second+1; ar[count+12]=(Orientation[OtherEdges[i].Ind1].first)?-1:1;
+		}
+		else{
+			glp_set_row_name(mip, i*4+1, ("c"+to_string(i*4+1)).c_str());
+			glp_set_row_bnds(mip, i*4+1, GLP_UP, -3, 1+1-(int)Orientation[OtherEdges[i].Ind1].first-1+(int)Orientation[OtherEdges[i].Ind2].first);
+			ia[count+1]=i*4+1; ja[count+1]=OtherEdgesVar[i].second+1; ar[count+1]=1;
+			ia[count+2]=i*4+1; ja[count+2]=Orientation[OtherEdges[i].Ind1].second+1; ar[count+2]=(Orientation[OtherEdges[i].Ind1].first)?-1:1;
+			ia[count+3]=i*4+1; ja[count+3]=Orientation[OtherEdges[i].Ind2].second+1; ar[count+3]=(Orientation[OtherEdges[i].Ind2].first)?1:-1;
+
+			glp_set_row_name(mip, i*4+2, ("c"+to_string(i*4+2)).c_str());
+			glp_set_row_bnds(mip, i*4+2, GLP_UP, -3, 1-1+(int)Orientation[OtherEdges[i].Ind1].first+1-(int)Orientation[OtherEdges[i].Ind2].first);
+			ia[count+4]=i*4+2; ja[count+4]=OtherEdgesVar[i].second+1; ar[count+4]=1;
+			ia[count+5]=i*4+2; ja[count+5]=Orientation[OtherEdges[i].Ind1].second+1; ar[count+5]=(Orientation[OtherEdges[i].Ind1].first)?1:-1;
+			ia[count+6]=i*4+2; ja[count+6]=Orientation[OtherEdges[i].Ind2].second+1; ar[count+6]=(Orientation[OtherEdges[i].Ind2].first)?-1:1;
+
+			glp_set_row_name(mip, i*4+3, ("c"+to_string(i*4+3)).c_str());
+			glp_set_row_bnds(mip, i*4+3, GLP_UP, -3, 2-1+(int)RelativePos[make_pair(OtherEdges[i].Ind1, OtherEdges[i].Ind2)].first-1+(int)Orientation[OtherEdges[i].Ind1].first);
+			ia[count+7]=i*4+3; ja[count+7]=OtherEdgesVar[i].second+1; ar[count+7]=1;
+			ia[count+8]=i*4+3; ja[count+8]=pairind+1; ar[count+8]=(RelativePos[make_pair(OtherEdges[i].Ind1, OtherEdges[i].Ind2)].first)?1:-1;
+			ia[count+9]=i*4+3; ja[count+9]=Orientation[OtherEdges[i].Ind1].second+1; ar[count+9]=(Orientation[OtherEdges[i].Ind1].first)?1:-1;
+
+			glp_set_row_name(mip, i*4+4, ("c"+to_string(i*4+4)).c_str());
+			glp_set_row_bnds(mip, i*4+4, GLP_UP, -3, 0+1-(int)RelativePos[make_pair(OtherEdges[i].Ind1, OtherEdges[i].Ind2)].first+1-(int)Orientation[OtherEdges[i].Ind1].first);
+			ia[count+10]=i*4+4; ja[count+10]=OtherEdgesVar[i].second+1; ar[count+10]=1;
+			ia[count+11]=i*4+4; ja[count+11]=pairind+1; ar[count+11]=(RelativePos[make_pair(OtherEdges[i].Ind1, OtherEdges[i].Ind2)].first)?-1:1;
+			ia[count+12]=i*4+4; ja[count+12]=Orientation[OtherEdges[i].Ind1].second+1; ar[count+12]=(Orientation[OtherEdges[i].Ind1].first)?-1:1;
+		}
+		count+=12;
+	}
+
+	int offset=4*OtherEdges.size();
 	int numconstr=0;
+	for(int i=0; i<OldCompNodes.size(); i++)
+		for(int j=i+1; j<OldCompNodes.size(); j++)
+			for(int k=j+1; k<OldCompNodes.size(); k++){
+				int pij=0, pjk=0, pik=0;
+				pij=RelativePos[make_pair(OldCompNodes[i], OldCompNodes[j])].second;
+				pjk=RelativePos[make_pair(OldCompNodes[j], OldCompNodes[k])].second;
+				pik=RelativePos[make_pair(OldCompNodes[i], OldCompNodes[k])].second;
+				int additionterm=-1+(int)RelativePos[make_pair(OldCompNodes[i], OldCompNodes[j])].first-1+(int)RelativePos[make_pair(OldCompNodes[j], OldCompNodes[k])].first+1-(int)RelativePos[make_pair(OldCompNodes[i], OldCompNodes[k])].first;
+				glp_set_row_name(mip, offset+numconstr+1, ("c"+to_string(offset+numconstr+1)).c_str());
+				glp_set_row_bnds(mip, offset+numconstr+1, GLP_DB, 0+additionterm, 1+additionterm);
+				ia[count+1]=offset+numconstr+1; ja[count+1]=pij+1; ar[count+1]=(RelativePos[make_pair(OldCompNodes[i], OldCompNodes[j])].first)?1:-1;
+				ia[count+2]=offset+numconstr+1; ja[count+2]=pjk+1; ar[count+2]=(RelativePos[make_pair(OldCompNodes[j], OldCompNodes[k])].first)?1:-1;
+				ia[count+3]=offset+numconstr+1; ja[count+3]=pik+1; ar[count+3]=(RelativePos[make_pair(OldCompNodes[i], OldCompNodes[k])].first)?-1:1;
+
+				numconstr++;
+				count+=3;
+			}
+	glp_load_matrix(mip, count, ia, ja, ar);
+
+	glp_iocp parm;
+	glp_init_iocp(&parm);
+	parm.presolve = GLP_ON;
+	parm.tm_lim=300000;
+	parm.msg_lev=GLP_MSG_ERR;
+	int err = glp_intopt(mip, &parm);
+
+	if(err==0 || glp_mip_status(mip)==GLP_FEAS){
+		if(err!=0){
+			cout<<"Find feasible solution instead of optimal solution.\n";
+		}
+		for(int i=0; i<OldCompNodes.size(); i++)
+			for(int j=i+1; j<OldCompNodes.size(); j++){
+				Z[i][j]=(glp_mip_col_val(mip, RelativePos[make_pair(OldCompNodes[i], OldCompNodes[j])].second+1)>0.5);
+				if(!RelativePos[make_pair(OldCompNodes[i], OldCompNodes[j])].first)
+					Z[i][j]=1-Z[i][j];
+			}
+		for(int i=0; i<OldCompNodes.size(); i++)
+			Z[i][i]=0;
+		for(int i=0; i<OldCompNodes.size(); i++)
+			for(int j=0; j<i; j++)
+				Z[i][j]=1-Z[j][i];
+
+		for(int i=0; i<OldCompNodes.size(); i++){
+			X[i]=(glp_mip_col_val(mip, Orientation[OldCompNodes[i]].second)>0.5);
+			if(!Orientation[OldCompNodes[i]].first)
+				X[i]=1-X[i];
+		}
+	}
+	else{
+		cout<<"ILP isn't successful\n";
+		if(err==GLP_ETMLIM)
+			cout<<"time limit has been exceeded\n";
+		else if(err==GLP_EBOUND)
+			cout<<"Unable to start the search, because some double-bounded variables have incorrect bounds\n";
+		else if(err==GLP_EROOT)
+			cout<<"optimal basis for initial LP relaxation is not provided\n";
+		else if(err==GLP_ENOPFS)
+			cout<<"LP relaxation of the MIP problem instance has no primal feasible solution\n";
+		else if(err==GLP_ENODFS)
+			cout<<"LP relaxation of the MIP problem instance has no dual feasible solution\n";
+		else if(err==GLP_EFAIL)
+			cout<<"The search was prematurely terminated due to the solver failure.\n";
+		else if(err==GLP_EMIPGAP)
+			cout<<"relative mip gap tolerance has been reached\n";
+		else if(err==GLP_ESTOP)
+			cout<<"The search was prematurely terminated by application.\n";
+	}
+};
+
+void SegmentGraph_t::GenerateILP(map<int,int>& CompNodes, vector<Edge_t>& CompEdges, vector< vector<int> >& Z, vector<int>& X){
+	glp_prob *mip=glp_create_prob();
+	glp_set_prob_name(mip, "GSG");
+	glp_set_obj_dir(mip, GLP_MAX);
+
+	glp_add_cols(mip, CompEdges.size()+CompNodes.size()+(CompNodes.size()-1)*(CompNodes.size())/2);
+	int edgeoffset=CompNodes.size();
+	int pairoffset=CompNodes.size()+CompEdges.size();
+	for(int i=0; i<CompNodes.size(); i++){
+		glp_set_col_name(mip, i+1, ("y"+to_string(i)).c_str());
+		glp_set_col_bnds(mip, i+1, GLP_DB, 0, 1);
+		glp_set_obj_coef(mip, i+1, 0);
+		glp_set_col_kind(mip, i+1, GLP_BV);
+	}
 	for(int i=0; i<CompEdges.size(); i++){
-		int pairind=0; // index of corresponding pairnodenames in variable vector
+		glp_set_col_name(mip, edgeoffset+i+1, ("x"+to_string(i)).c_str());
+		glp_set_col_bnds(mip, edgeoffset+i+1, GLP_DB, 0, 1);
+		glp_set_obj_coef(mip, edgeoffset+i+1, CompEdges[i].Weight);
+		glp_set_col_kind(mip, edgeoffset+i+1, GLP_BV);
+	}
+	int count=0;
+	for(int i=0; i<CompNodes.size(); i++)
+		for(int j=i+1; j<CompNodes.size(); j++){
+			glp_set_col_name(mip, pairoffset+count+1, ("z"+to_string(i)+to_string(j)).c_str());
+			glp_set_col_bnds(mip, pairoffset+count+1, GLP_DB, 0, 1);
+			glp_set_obj_coef(mip, pairoffset+count+1, 0);
+			glp_set_col_kind(mip, pairoffset+count+1, GLP_BV);
+			count++;
+		}
+
+	count=0;
+	int * ia=new int[12*CompEdges.size()+(CompNodes.size())*(CompNodes.size()-1)*(CompNodes.size()-2)/2+1];
+	int * ja=new int[12*CompEdges.size()+(CompNodes.size())*(CompNodes.size()-1)*(CompNodes.size()-2)/2+1];
+	double * ar=new double[12*CompEdges.size()+(CompNodes.size())*(CompNodes.size()-1)*(CompNodes.size()-2)/2+1];
+	glp_add_rows(mip, 4*(int)CompEdges.size()+(CompNodes.size())*(CompNodes.size()-1)*(CompNodes.size()-2)/6); // this doesn't containt he second part, topological order contains
+	for(int i=0; i<CompEdges.size(); i++){
+		int pairind=0; // index of corresponding pairnode
 		for(int j=0; j<min(CompNodes[CompEdges[i].Ind1], CompNodes[CompEdges[i].Ind2]); j++)
 			pairind+=(int)CompNodes.size()-j-1;
 		pairind+=abs(CompNodes[CompEdges[i].Ind1]-CompNodes[CompEdges[i].Ind2])-1;
 		if((CompNodes[CompEdges[i].Ind1]<CompNodes[CompEdges[i].Ind2] && CompEdges[i].Head1==false && CompEdges[i].Head2==true) || (CompNodes[CompEdges[i].Ind1]>CompNodes[CompEdges[i].Ind2] && CompEdges[i].Head1==true && CompEdges[i].Head2==false)){
-			model.addConstr(vGRBVar[edgeoffset+i] <= vGRBVar[CompNodes[CompEdges[i].Ind1]] - vGRBVar[CompNodes[CompEdges[i].Ind2]] + 1, "c"+to_string(numconstr++));
-			model.addConstr(vGRBVar[edgeoffset+i] <= vGRBVar[CompNodes[CompEdges[i].Ind2]] - vGRBVar[CompNodes[CompEdges[i].Ind1]] + 1, "c"+to_string(numconstr++));
-			model.addConstr(vGRBVar[edgeoffset+i] <= vGRBVar[CompNodes[CompEdges[i].Ind1]] - vGRBVar[pairoffset+pairind] + 1, "c"+to_string(numconstr++));
-			model.addConstr(vGRBVar[edgeoffset+i] <= vGRBVar[pairoffset+pairind] - vGRBVar[CompNodes[CompEdges[i].Ind1]] + 1, "c"+to_string(numconstr++));
+			glp_set_row_name(mip, i*4+1, ("c"+to_string(i*4+1)).c_str());
+			glp_set_row_bnds(mip, i*4+1, GLP_UP, 0, 1);
+			ia[count+1]=i*4+1; ja[count+1]=edgeoffset+i+1; ar[count+1]=1;
+			ia[count+2]=i*4+1; ja[count+2]=CompNodes[CompEdges[i].Ind1]+1; ar[count+2]=-1;
+			ia[count+3]=i*4+1; ja[count+3]=CompNodes[CompEdges[i].Ind2]+1; ar[count+3]=1;
+
+			glp_set_row_name(mip, i*4+2, ("c"+to_string(i*4+2)).c_str());
+			glp_set_row_bnds(mip, i*4+2, GLP_UP, 0, 1);
+			ia[count+4]=i*4+2; ja[count+4]=edgeoffset+i+1; ar[count+4]=1;
+			ia[count+5]=i*4+2; ja[count+5]=CompNodes[CompEdges[i].Ind1]+1; ar[count+5]=1;
+			ia[count+6]=i*4+2; ja[count+6]=CompNodes[CompEdges[i].Ind2]+1; ar[count+6]=-1;
+
+			glp_set_row_name(mip, i*4+3, ("c"+to_string(i*4+3)).c_str());
+			glp_set_row_bnds(mip, i*4+3, GLP_UP, 0, 1);
+			ia[count+7]=i*4+3; ja[count+7]=edgeoffset+i+1; ar[count+7]=1;
+			ia[count+8]=i*4+3; ja[count+8]=pairoffset+pairind+1; ar[count+8]=-1;
+			ia[count+9]=i*4+3; ja[count+9]=CompNodes[CompEdges[i].Ind1]+1; ar[count+9]=1;
+
+			glp_set_row_name(mip, i*4+4, ("c"+to_string(i*4+4)).c_str());
+			glp_set_row_bnds(mip, i*4+4, GLP_UP, 0, 1);
+			ia[count+10]=i*4+4; ja[count+10]=edgeoffset+i+1; ar[count+10]=1;
+			ia[count+11]=i*4+4; ja[count+11]=pairoffset+pairind+1; ar[count+11]=1;
+			ia[count+12]=i*4+4; ja[count+12]=CompNodes[CompEdges[i].Ind1]+1; ar[count+12]=-1;
 		}
 		else if(CompEdges[i].Head1==false && CompEdges[i].Head2==false){
-			model.addConstr(vGRBVar[edgeoffset+i] <= vGRBVar[CompNodes[CompEdges[i].Ind1]] + vGRBVar[CompNodes[CompEdges[i].Ind2]], "c"+to_string(numconstr++));
-			model.addConstr(vGRBVar[edgeoffset+i] <= 2 - vGRBVar[CompNodes[CompEdges[i].Ind1]] - vGRBVar[CompNodes[CompEdges[i].Ind2]], "c"+to_string(numconstr++));
+			glp_set_row_name(mip, i*4+1, ("c"+to_string(i*4+1)).c_str());
+			glp_set_row_bnds(mip, i*4+1, GLP_UP, 0, 0);
+			ia[count+1]=i*4+1; ja[count+1]=edgeoffset+i+1; ar[count+1]=1;
+			ia[count+2]=i*4+1; ja[count+2]=CompNodes[CompEdges[i].Ind1]+1; ar[count+2]=-1;
+			ia[count+3]=i*4+1; ja[count+3]=CompNodes[CompEdges[i].Ind2]+1; ar[count+3]=-1;
+
+			glp_set_row_name(mip, i*4+2, ("c"+to_string(i*4+2)).c_str());
+			glp_set_row_bnds(mip, i*4+2, GLP_UP, 0, 2);
+			ia[count+4]=i*4+2; ja[count+4]=edgeoffset+i+1; ar[count+4]=1;
+			ia[count+5]=i*4+2; ja[count+5]=CompNodes[CompEdges[i].Ind1]+1; ar[count+5]=1;
+			ia[count+6]=i*4+2; ja[count+6]=CompNodes[CompEdges[i].Ind2]+1; ar[count+6]=1;
+
 			if(CompNodes[CompEdges[i].Ind1]<CompNodes[CompEdges[i].Ind2]){
-				model.addConstr(vGRBVar[edgeoffset+i] <= vGRBVar[CompNodes[CompEdges[i].Ind1]] - vGRBVar[pairoffset+pairind] + 1, "c"+to_string(numconstr++));
-				model.addConstr(vGRBVar[edgeoffset+i] <= vGRBVar[pairoffset+pairind] - vGRBVar[CompNodes[CompEdges[i].Ind1]] + 1, "c"+to_string(numconstr++));
+				glp_set_row_name(mip, i*4+3, ("c"+to_string(i*4+3)).c_str());
+				glp_set_row_bnds(mip, i*4+3, GLP_UP, 0, 1);
+				ia[count+7]=i*4+3; ja[count+7]=edgeoffset+i+1; ar[count+7]=1;
+				ia[count+8]=i*4+3; ja[count+8]=pairoffset+pairind+1; ar[count+8]=-1;
+				ia[count+9]=i*4+3; ja[count+9]=CompNodes[CompEdges[i].Ind1]+1; ar[count+9]=1;
+
+				glp_set_row_name(mip, i*4+4, ("c"+to_string(i*4+4)).c_str());
+				glp_set_row_bnds(mip, i*4+4, GLP_UP, 0, 1);
+				ia[count+10]=i*4+4; ja[count+10]=edgeoffset+i+1; ar[count+10]=1;
+				ia[count+11]=i*4+4; ja[count+11]=pairoffset+pairind+1; ar[count+11]=1;
+				ia[count+12]=i*4+4; ja[count+12]=CompNodes[CompEdges[i].Ind1]+1; ar[count+12]=-1;
 			}
 			else{
-				model.addConstr(vGRBVar[edgeoffset+i] <= vGRBVar[CompNodes[CompEdges[i].Ind2]] - vGRBVar[pairoffset+pairind] + 1, "c"+to_string(numconstr++));
-				model.addConstr(vGRBVar[edgeoffset+i] <= vGRBVar[pairoffset+pairind] - vGRBVar[CompNodes[CompEdges[i].Ind2]] + 1, "c"+to_string(numconstr++));
+				glp_set_row_name(mip, i*4+3, ("c"+to_string(i*4+3)).c_str());
+				glp_set_row_bnds(mip, i*4+3, GLP_UP, 0, 1);
+				ia[count+7]=i*4+3; ja[count+7]=edgeoffset+i+1; ar[count+7]=1;
+				ia[count+8]=i*4+3; ja[count+8]=pairoffset+pairind+1; ar[count+8]=-1;
+				ia[count+9]=i*4+3; ja[count+9]=CompNodes[CompEdges[i].Ind2]+1; ar[count+9]=1;
+
+				glp_set_row_name(mip, i*4+4, ("c"+to_string(i*4+4)).c_str());
+				glp_set_row_bnds(mip, i*4+4, GLP_UP, 0, 1);
+				ia[count+10]=i*4+4; ja[count+10]=edgeoffset+i+1; ar[count+10]=1;
+				ia[count+11]=i*4+4; ja[count+11]=pairoffset+pairind+1; ar[count+11]=1;
+				ia[count+12]=i*4+4; ja[count+12]=CompNodes[CompEdges[i].Ind2]+1; ar[count+12]=-1;
 			}
 		}
 		else if(CompEdges[i].Head1==true && CompEdges[i].Head2==true){
-			model.addConstr(vGRBVar[edgeoffset+i] <= vGRBVar[CompNodes[CompEdges[i].Ind1]] + vGRBVar[CompNodes[CompEdges[i].Ind2]], "c"+to_string(numconstr++));
-			model.addConstr(vGRBVar[edgeoffset+i] <= 2 - vGRBVar[CompNodes[CompEdges[i].Ind1]] - vGRBVar[CompNodes[CompEdges[i].Ind2]], "c"+to_string(numconstr++));
+			glp_set_row_name(mip, i*4+1, ("c"+to_string(i*4+1)).c_str());
+			glp_set_row_bnds(mip, i*4+1, GLP_UP, 0, 0);
+			ia[count+1]=i*4+1; ja[count+1]=edgeoffset+i+1; ar[count+1]=1;
+			ia[count+2]=i*4+1; ja[count+2]=CompNodes[CompEdges[i].Ind1]+1; ar[count+2]=-1;
+			ia[count+3]=i*4+1; ja[count+3]=CompNodes[CompEdges[i].Ind2]+1; ar[count+3]=-1;
+
+			glp_set_row_name(mip, i*4+2, ("c"+to_string(i*4+2)).c_str());
+			glp_set_row_bnds(mip, i*4+2, GLP_UP, 0, 2);
+			ia[count+4]=i*4+2; ja[count+4]=edgeoffset+i+1; ar[count+4]=1;
+			ia[count+5]=i*4+2; ja[count+5]=CompNodes[CompEdges[i].Ind1]+1; ar[count+5]=1;
+			ia[count+6]=i*4+2; ja[count+6]=CompNodes[CompEdges[i].Ind2]+1; ar[count+6]=1;
+
 			if(CompNodes[CompEdges[i].Ind1]<CompNodes[CompEdges[i].Ind2]){
-				model.addConstr(vGRBVar[edgeoffset+i] <= vGRBVar[CompNodes[CompEdges[i].Ind2]] - vGRBVar[pairoffset+pairind] + 1, "c"+to_string(numconstr++));
-				model.addConstr(vGRBVar[edgeoffset+i] <= vGRBVar[pairoffset+pairind] - vGRBVar[CompNodes[CompEdges[i].Ind2]] + 1, "c"+to_string(numconstr++));
+				glp_set_row_name(mip, i*4+3, ("c"+to_string(i*4+3)).c_str());
+				glp_set_row_bnds(mip, i*4+3, GLP_UP, 0, 1);
+				ia[count+7]=i*4+3; ja[count+7]=edgeoffset+i+1; ar[count+7]=1;
+				ia[count+8]=i*4+3; ja[count+8]=pairoffset+pairind+1; ar[count+8]=-1;
+				ia[count+9]=i*4+3; ja[count+9]=CompNodes[CompEdges[i].Ind2]+1; ar[count+9]=1;
+
+				glp_set_row_name(mip, i*4+4, ("c"+to_string(i*4+4)).c_str());
+				glp_set_row_bnds(mip, i*4+4, GLP_UP, 0, 1);
+				ia[count+10]=i*4+4; ja[count+10]=edgeoffset+i+1; ar[count+10]=1;
+				ia[count+11]=i*4+4; ja[count+11]=pairoffset+pairind+1; ar[count+11]=1;
+				ia[count+12]=i*4+4; ja[count+12]=CompNodes[CompEdges[i].Ind2]+1; ar[count+12]=-1;
 			}
 			else{
-				model.addConstr(vGRBVar[edgeoffset+i] <= vGRBVar[CompNodes[CompEdges[i].Ind1]] - vGRBVar[pairoffset+pairind] + 1, "c"+to_string(numconstr++));
-				model.addConstr(vGRBVar[edgeoffset+i] <= vGRBVar[pairoffset+pairind] - vGRBVar[CompNodes[CompEdges[i].Ind1]] + 1, "c"+to_string(numconstr++));
+				glp_set_row_name(mip, i*4+3, ("c"+to_string(i*4+3)).c_str());
+				glp_set_row_bnds(mip, i*4+3, GLP_UP, 0, 1);
+				ia[count+7]=i*4+3; ja[count+7]=edgeoffset+i+1; ar[count+7]=1;
+				ia[count+8]=i*4+3; ja[count+8]=pairoffset+pairind+1; ar[count+8]=-1;
+				ia[count+9]=i*4+3; ja[count+9]=CompNodes[CompEdges[i].Ind1]+1; ar[count+9]=1;
+
+				glp_set_row_name(mip, i*4+4, ("c"+to_string(i*4+4)).c_str());
+				glp_set_row_bnds(mip, i*4+4, GLP_UP, 0, 1);
+				ia[count+10]=i*4+4; ja[count+10]=edgeoffset+i+1; ar[count+10]=1;
+				ia[count+11]=i*4+4; ja[count+11]=pairoffset+pairind+1; ar[count+11]=1;
+				ia[count+12]=i*4+4; ja[count+12]=CompNodes[CompEdges[i].Ind1]+1; ar[count+12]=-1;
 			}
 		}
 		else{
-			model.addConstr(vGRBVar[edgeoffset+i] <= vGRBVar[CompNodes[CompEdges[i].Ind1]] - vGRBVar[CompNodes[CompEdges[i].Ind2]] + 1, "c"+to_string(numconstr++));
-			model.addConstr(vGRBVar[edgeoffset+i] <= vGRBVar[CompNodes[CompEdges[i].Ind2]] - vGRBVar[CompNodes[CompEdges[i].Ind1]] + 1, "c"+to_string(numconstr++));
-			model.addConstr(vGRBVar[edgeoffset+i] <= vGRBVar[CompNodes[CompEdges[i].Ind1]] + vGRBVar[pairoffset+pairind], "c"+to_string(numconstr++));
-			model.addConstr(vGRBVar[edgeoffset+i] <= 2 - vGRBVar[pairoffset+pairind] - vGRBVar[CompNodes[CompEdges[i].Ind1]], "c"+to_string(numconstr++));
+			glp_set_row_name(mip, i*4+1, ("c"+to_string(i*4+1)).c_str());
+			glp_set_row_bnds(mip, i*4+1, GLP_UP, 0, 1);
+			ia[count+1]=i*4+1; ja[count+1]=edgeoffset+i+1; ar[count+1]=1;
+			ia[count+2]=i*4+1; ja[count+2]=CompNodes[CompEdges[i].Ind1]+1; ar[count+2]=-1;
+			ia[count+3]=i*4+1; ja[count+3]=CompNodes[CompEdges[i].Ind2]+1; ar[count+3]=1;
+
+			glp_set_row_name(mip, i*4+2, ("c"+to_string(i*4+2)).c_str());
+			glp_set_row_bnds(mip, i*4+2, GLP_UP, 0, 1);
+			ia[count+4]=i*4+2; ja[count+4]=edgeoffset+i+1; ar[count+4]=1;
+			ia[count+5]=i*4+2; ja[count+5]=CompNodes[CompEdges[i].Ind1]+1; ar[count+5]=1;
+			ia[count+6]=i*4+2; ja[count+6]=CompNodes[CompEdges[i].Ind2]+1; ar[count+6]=-1;
+
+			glp_set_row_name(mip, i*4+3, ("c"+to_string(i*4+3)).c_str());
+			glp_set_row_bnds(mip, i*4+3, GLP_UP, 0, 2);
+			ia[count+7]=i*4+3; ja[count+7]=edgeoffset+i+1; ar[count+7]=1;
+			ia[count+8]=i*4+3; ja[count+8]=pairoffset+pairind+1; ar[count+8]=1;
+			ia[count+9]=i*4+3; ja[count+9]=CompNodes[CompEdges[i].Ind1]+1; ar[count+9]=1;
+
+			glp_set_row_name(mip, i*4+4, ("c"+to_string(i*4+4)).c_str());
+			glp_set_row_bnds(mip, i*4+4, GLP_UP, 0, 0);
+			ia[count+10]=i*4+4; ja[count+10]=edgeoffset+i+1; ar[count+10]=1;
+			ia[count+11]=i*4+4; ja[count+11]=pairoffset+pairind+1; ar[count+11]=-1;
+			ia[count+12]=i*4+4; ja[count+12]=CompNodes[CompEdges[i].Ind1]+1; ar[count+12]=-1;
 		}
+		count+=12;
 	}
-	for(int i=0; i<CompNodes.size(); i++){
-		for(int j=i+1; j<CompNodes.size(); j++){
+	int offset=4*CompEdges.size();
+	int numconstr=0;
+	for(int i=0; i<CompNodes.size(); i++)
+		for(int j=i+1; j<CompNodes.size(); j++)
 			for(int k=j+1; k<CompNodes.size(); k++){
-				int pij=pairoffset, pjk=pairoffset, pik=pairoffset;
+				int pij=0, pjk=0, pik=0;
 				for(int l=0; l<i; l++)
 					pij+=(int)CompNodes.size()-l-1;
 				pij+=(j-i-1);
@@ -3010,12 +3899,65 @@ void SegmentGraph_t::GenerateILP(std::map<int,int>& CompNodes, vector<Edge_t>& C
 				for(int l=0; l<i; l++)
 					pik+=(int)CompNodes.size()-l-1;
 				pik+=(k-i-1);
-				model.addConstr(vGRBVar[pij] + vGRBVar[pjk] + 1 - vGRBVar[pik] >= 1, "c"+to_string(numconstr++));
-				model.addConstr(vGRBVar[pij] + vGRBVar[pjk] + 1 - vGRBVar[pik] <= 2, "c"+to_string(numconstr++));
+				glp_set_row_name(mip, offset+numconstr+1, ("c"+to_string(offset+numconstr+1)).c_str());
+				glp_set_row_bnds(mip, offset+numconstr+1, GLP_DB, 0, 1);
+				ia[count+1]=offset+numconstr+1; ja[count+1]=pairoffset+pij+1; ar[count+1]=1;
+				ia[count+2]=offset+numconstr+1; ja[count+2]=pairoffset+pjk+1; ar[count+2]=1;
+				ia[count+3]=offset+numconstr+1; ja[count+3]=pairoffset+pik+1; ar[count+3]=-1;
+
+				numconstr++;
+				count+=3;
 			}
-		}
+	glp_load_matrix(mip, count, ia, ja, ar);
+
+	glp_iocp parm;
+	glp_init_iocp(&parm);
+	parm.presolve = GLP_ON;
+	parm.tm_lim=300000;
+	parm.msg_lev=GLP_MSG_ERR;
+	int err = glp_intopt(mip, &parm);
+
+	count=0;
+	if(err==0){
+		for(int i=0; i<CompNodes.size(); i++)
+			for(int j=i+1; j<CompNodes.size(); j++){
+				Z[i][j]=(glp_mip_col_val(mip, pairoffset+count+1)>0.5);
+				count++;
+			}
+		for(int i=0; i<CompNodes.size(); i++)
+			Z[i][i]=0;
+		for(int i=0; i<CompNodes.size(); i++)
+			for(int j=0; j<i; j++)
+				Z[i][j]=1-Z[j][i];
+
+		for(int i=0; i<CompNodes.size(); i++)
+			X[i]=(glp_mip_col_val(mip, i+1)>0.5);
 	}
+	else{
+		if(err==GLP_ETMLIM)
+			cout<<"time limit has been exceeded\n";
+		else if(err==GLP_EBOUND)
+			cout<<"Unable to start the search, because some double-bounded variables have incorrect bounds\n";
+		else if(err==GLP_EROOT)
+			cout<<"optimal basis for initial LP relaxation is not provided\n";
+		else if(err==GLP_ENOPFS)
+			cout<<"LP relaxation of the MIP problem instance has no primal feasible solution\n";
+		else if(err==GLP_ENODFS)
+			cout<<"LP relaxation of the MIP problem instance has no dual feasible solution\n";
+		else if(err==GLP_EFAIL)
+			cout<<"The search was prematurely terminated due to the solver failure.\n";
+		else if(err==GLP_EMIPGAP)
+			cout<<"relative mip gap tolerance has been reached\n";
+		else if(err==GLP_ESTOP)
+			cout<<"The search was prematurely terminated by application.\n";
+	}
+	
+	// free glpk environment
+	//err=glp_free_env();
+	//if(err!=0)
+	//	cout<<"free environment UNSUCCESSFUL\n";
 };
+
 
 vector< vector<int> > SegmentGraph_t::SortComponents(vector< vector<int> >& Components){
 	std::map<int,int> Median_ID;

@@ -1,3 +1,9 @@
+/*
+Part of SQUID transcriptomic structural variation detector
+(c) 2017 by  Cong Ma, Mingfu Shao, Carl Kingsford, and Carnegie Mellon University.
+See LICENSE for licensing.
+*/
+
 #ifndef __SEGMENTGRAPH_H__
 #define __SEGMENTGRAPH_H__
 
@@ -21,7 +27,7 @@
 #include "boost/graph/stoer_wagner_min_cut.hpp"
 #include "boost/property_map/property_map.hpp"
 #include "boost/typeof/typeof.hpp"
-#include "gurobi_c++.h"
+#include "glpk.h"
 #include "BPEdge.h"
 #include "BPNode.h"
 #include "ReadRec.h"
@@ -36,6 +42,7 @@ extern int Concord_Dist_Idx;
 extern int Min_Edge_Weight;
 extern uint16_t ReadLen;
 extern double DiscordantRatio;
+extern int MaxAllowedDegree;
 
 typedef boost::adjacency_list<boost::vecS, boost::vecS, boost::undirectedS, boost::no_property, boost::property<boost::edge_weight_t, int> > undirected_graph;
 typedef boost::property_map<undirected_graph, boost::edge_weight_t>::type weight_map_type;
@@ -71,7 +78,7 @@ public:
 	void BuildNode_BWA(const vector<int>& RefLength, string bamfile);
 	void BuildEdges(SBamrecord_t& Chimrecord, string ConcordBamfile);
 	void FilterbyWeight();
-	void FilterbyInterleaving();
+	void FilterbyInterleaving(vector<bool>& KeepEdge);
 
 	vector<int> LocateRead(int initialguess, ReadRec_t& ReadRec);
 	vector<int> LocateRead(vector<int>& singleRead_Node, ReadRec_t& ReadRec);
@@ -80,7 +87,7 @@ public:
 	void RawEdgesOther(SBamrecord_t& Chimrecord, string ConcordBamfile);
 	void RawEdges(SBamrecord_t& Chimrecord, string bamfile);
 	
-	void FilterEdges();
+	void FilterEdges(const vector<bool>& KeepEdge);
 	void UpdateNodeLink();
 	void CompressNode();
 	void CompressNode(vector< vector<int> >& Read_Node);
@@ -91,13 +98,16 @@ public:
 	void ConnectedComponent(int & maxcomponentsize);
 	void ConnectedComponent();
 	void MultiplyDisEdges();
+	void DeMultiplyDisEdges();
 
 	void ExactBreakpoint(SBamrecord_t& Chimrecord, map<Edge_t, vector< pair<int,int> > >& ExactBP);
+	void ExactBPConcordantSupport(string Input_BAM, SBamrecord_t& Chimrecord, const map<Edge_t, vector< pair<int,int> > >& ExactBP, map<Edge_t, vector< pair<int,int> > >& ExactBP_concord_support);
 	void OutputGraph(string outputfile);
 
 	vector< vector<int> > Ordering();
 	vector<int> MincutRecursion(std::map<int,int> CompNodes, vector<Edge_t> CompEdges);
-	void GenerateILP(std::map<int,int>& CompNodes, vector<Edge_t>& CompEdges, GRBEnv& env, GRBModel& model, vector<GRBVar>& vGRBVar);
+	void GenerateILP(std::map<int,int>& CompNodes, vector<Edge_t>& CompEdges, vector< vector<int> >& Z, vector<int>& X);
+	void GenerateSqueezedILP(std::map<int,int>& CompNodes, vector<Edge_t>& CompEdges, vector< vector<int> >& Z, vector<int>& X);
 
 	vector< vector<int> > SortComponents(vector< vector<int> >& Components);
 	vector< vector<int> > MergeSingleton(vector< vector<int> >& Components, const vector<int>& RefLength, int LenCutOff=500000);

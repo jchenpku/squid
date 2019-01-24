@@ -1,3 +1,9 @@
+/*
+Part of SQUID transcriptomic structural variation detector
+(c) 2017 by  Cong Ma, Mingfu Shao, Carl Kingsford, and Carnegie Mellon University.
+See LICENSE for licensing.
+*/
+
 #ifndef __CONFIG_H__
 #define __CONFIG_H__
 
@@ -14,6 +20,8 @@
 
 using namespace std;
 
+extern string SQUIDversion;
+
 // parameter from BAM
 extern uint16_t ReadLen;
 
@@ -29,6 +37,7 @@ extern int Concord_Dist_Pos;
 extern int Concord_Dist_Idx;
 extern int Min_Edge_Weight;
 extern double DiscordantRatio; /*multiplier of discordant edge weight, related to normal-tumor cell ratio*/
+extern int MaxAllowedDegree;
 	// input and output
 extern string Input_BAM;
 extern string Input_Chim_BAM;
