@@ -42,6 +42,7 @@ extern int Concord_Dist_Idx;
 extern int Min_Edge_Weight;
 extern uint16_t ReadLen;
 extern double DiscordantRatio;
+extern int MaxAllowedDegree;
 
 typedef boost::adjacency_list<boost::vecS, boost::vecS, boost::undirectedS, boost::no_property, boost::property<boost::edge_weight_t, int> > undirected_graph;
 typedef boost::property_map<undirected_graph, boost::edge_weight_t>::type weight_map_type;
@@ -77,7 +78,7 @@ public:
 	void BuildNode_BWA(const vector<int>& RefLength, string bamfile);
 	void BuildEdges(SBamrecord_t& Chimrecord, string ConcordBamfile);
 	void FilterbyWeight();
-	void FilterbyInterleaving();
+	void FilterbyInterleaving(vector<bool>& KeepEdge);
 
 	vector<int> LocateRead(int initialguess, ReadRec_t& ReadRec);
 	vector<int> LocateRead(vector<int>& singleRead_Node, ReadRec_t& ReadRec);
@@ -86,7 +87,7 @@ public:
 	void RawEdgesOther(SBamrecord_t& Chimrecord, string ConcordBamfile);
 	void RawEdges(SBamrecord_t& Chimrecord, string bamfile);
 	
-	void FilterEdges();
+	void FilterEdges(const vector<bool>& KeepEdge);
 	void UpdateNodeLink();
 	void CompressNode();
 	void CompressNode(vector< vector<int> >& Read_Node);
@@ -97,8 +98,10 @@ public:
 	void ConnectedComponent(int & maxcomponentsize);
 	void ConnectedComponent();
 	void MultiplyDisEdges();
+	void DeMultiplyDisEdges();
 
 	void ExactBreakpoint(SBamrecord_t& Chimrecord, map<Edge_t, vector< pair<int,int> > >& ExactBP);
+	void ExactBPConcordantSupport(string Input_BAM, SBamrecord_t& Chimrecord, const map<Edge_t, vector< pair<int,int> > >& ExactBP, map<Edge_t, vector< pair<int,int> > >& ExactBP_concord_support);
 	void OutputGraph(string outputfile);
 
 	vector< vector<int> > Ordering();
